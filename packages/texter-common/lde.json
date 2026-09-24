@@ -1,0 +1,8 @@
+{
+	"$schema": "https://raw.githubusercontent.com/lde-org/lde/master/schemas/lde.schema.json",
+	"name": "texter-common",
+	"description": "The parts of reading text every backend needs: characters, and what a font file calls itself",
+	"authors": ["David Cruz <david@bycruz.dev>"],
+	"version": "0.1.0",
+	"dependencies": {}
+}

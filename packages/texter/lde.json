@@ -1,0 +1,18 @@
+{
+	"$schema": "https://raw.githubusercontent.com/lde-org/lde/master/schemas/lde.schema.json",
+	"name": "texter",
+	"description": "Text shaping and glyphs from what the system already has",
+	"authors": ["David Cruz <david@bycruz.dev>"],
+	"version": "0.1.0",
+	"dependencies": {
+		"texter-freetype": { "path": "../texter-freetype", "optional": true },
+		"texter-win32": { "path": "../texter-win32", "optional": true },
+		"texter-coretext": { "path": "../texter-coretext", "optional": true }
+	},
+	"features": {
+		"linux": ["texter-freetype"],
+		"android": ["texter-freetype"],
+		"windows": ["texter-win32"],
+		"macos": ["texter-coretext"]
+	}
+}
