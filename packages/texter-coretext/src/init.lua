@@ -412,10 +412,11 @@ end
 ---@return texter.Line
 function coretext.shape(face, text, pixelHeight, _opts)
 	local font = face:font(pixelHeight)
-	local wide, bytes, count = wideOf(text)
-	-- What the line is made of is a string of the framework's own, and what it is called here is
-	-- not `string`: that is what a caller formats with, and a local of that name is every use of it
-	-- in this function reading a field of a font string.
+	local _, bytes = wideOf(text)
+
+	-- What the line is made of is a string of the framework's own, and it is not a local called
+	-- `string`: that is what a caller formats with, and one of that name here would make every use
+	-- of it in this function read a field of a font instead.
 	local cfText = core.CFStringCreateWithBytes(nil, ffi.cast("const unsigned char *", text), #text,
 		ENCODING_UTF8, 0)
 
@@ -433,7 +434,7 @@ function coretext.shape(face, text, pixelHeight, _opts)
 	-- How wide the whole line is, which is the line's own and not a run's: what a run is worth is a
 	-- part of it, and asking the line what it comes to once a run is asking it as many times as
 	-- there are runs.
-	local x = coreText.CTLineGetTypographicBounds(line, ascent, descent, leading)
+	local width = coreText.CTLineGetTypographicBounds(line, ascent, descent, leading)
 
 	--- What byte of the line a UTF-16 unit of it starts at.
 	---@param unit number
@@ -495,7 +496,7 @@ function coretext.shape(face, text, pixelHeight, _opts)
 	for index = 1, #glyphs do
 		local next = glyphs[index + 1]
 
-		glyphs[index].advance = (next and next.x or x) - glyphs[index].x
+		glyphs[index].advance = (next and next.x or width) - glyphs[index].x
 	end
 
 	core.CFRelease(line)
@@ -506,7 +507,7 @@ function coretext.shape(face, text, pixelHeight, _opts)
 
 	local rtl = #placed > 0 and placed[1].rtl or false
 
-	return { glyphs = glyphs, width = x, rtl = rtl, runs = placed, text = text }
+	return { glyphs = glyphs, width = width, rtl = rtl, runs = placed, text = text }
 end
 
 ---@param face texter.coretext.Face
