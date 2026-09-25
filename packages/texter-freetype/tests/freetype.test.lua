@@ -24,6 +24,26 @@ local ARABIC = {
 	"C:/Windows/Fonts/arial.ttf",
 }
 
+--- The emoji fonts a desktop is likely to have: the one a colour emoji is drawn from, and the
+--- black and white ones, which are fonts of outlines and are what a machine without a colour one
+--- has. Whether FreeType can *paint* one is a question about the font and not about this library.
+local EMOJI = {
+	"/usr/share/fonts/google-noto-color-emoji-fonts/Noto-COLRv1.ttf",
+	"/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+	"/usr/share/fonts/google-noto-emoji-fonts/NotoEmoji-Regular.ttf",
+	"/System/Library/Fonts/Apple Color Emoji.ttc",
+	"/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+	"C:/Windows/Fonts/seguiemj.ttf",
+}
+
+--- The font this package keeps for the tests of a glyph a font draws in layers: a red square with a
+--- blue dot on it, made with fontTools, tables and all. It is looked for where the test runner keeps
+--- its own folder, so that it runs from the package and from the repository.
+local COLOUR = {
+	"tests/fonts/colour.ttf",
+	"packages/texter-freetype/tests/fonts/colour.ttf",
+}
+
 ---@param paths string[]
 ---@return string? path
 local function present(paths)
@@ -40,6 +60,47 @@ end
 
 local latinPath = present(LATIN)
 local arabicPath = present(ARABIC)
+local colourPath = present(COLOUR)
+
+--- A face of a font that draws emoji at all, which is what the emoji tests are about: a machine
+--- whose fonts have none of them skips rather than fails.
+---@return texter.freetype.Face? face
+local function anEmojiFace()
+	if not texter.available() then
+		return nil
+	end
+
+	for _, path in ipairs(EMOJI) do
+		local file = io.open(path, "rb")
+
+		if file then
+			file:close()
+
+			local made, face = pcall(texter.face, path, 0)
+
+			if made and face and face:hasGlyph(0x1F600) and face:hasGlyph(0x1F680) then
+				return face
+			end
+		end
+	end
+end
+
+local emojiFace = anEmojiFace()
+
+--- Where each character of a string starts, which is what a cluster of a glyph is checked against.
+---@param text string
+---@return table<number, boolean>
+local function starts(text)
+	local common = require("texter-common")
+	local characters = common.utf8.characters(text)
+	local at = {}
+
+	for index = 0, characters.count - 1 do
+		at[characters.offsets[index] - 1] = true
+	end
+
+	return at
+end
 
 test.skipIf(not texter.available())("says what is missing rather than failing, where a library is", function()
 	test.equal(texter.why(), nil, "everything it draws with was found")
@@ -212,8 +273,8 @@ test.skipIf(not texter.available() or latinPath == nil)("answers what wonderland
 	face:freeInk(face:ink(0x41, 18))
 end)
 
-test.skipIf(not texter or fontPath == nil)("draws a glyph the right way up", function()
-	local face = assert(texter.face(assert(fontPath), 0))
+test.skipIf(not texter.available() or latinPath == nil)("draws a glyph the right way up", function()
+	local face = assert(texter.face(assert(latinPath), 0))
 
 	-- An L is a stem with a bar along the bottom: a bitmap that came out upside down has its weight
 	-- at the other end of it, which is what this is written against.
@@ -222,4 +283,155 @@ test.skipIf(not texter or fontPath == nil)("draws a glyph the right way up", fun
 	test.greater(ink.height, 4, "it has rows to look at")
 	test.greater(rowInk(ink, ink.height - 1), rowInk(ink, 0),
 		"and the bottom of an L has more ink in it than the top")
+end)
+
+test.skipIf(emojiFace == nil)("draws an emoji, which is a character outside the basic plane", function()
+	local face = assert(emojiFace)
+
+	test.truthy(face:hasGlyph(0x1F600), "it says it draws a grinning face, which is two UTF-16 units")
+
+	local line = texter.shape(face, "😀", 24)
+
+	test.equal(#line.glyphs, 1, "and one of it is one glyph")
+	test.greater(line.glyphs[1].glyph, 0, "which is a glyph of the font rather than the one for nothing")
+	test.equal(line.glyphs[1].cluster, 0, "and it came from the first byte of the line")
+	test.greater(line.width, 0, "and it takes room on it")
+end)
+
+test.skipIf(emojiFace == nil)("counts an emoji in bytes of the line, which is four of them", function()
+	local face = assert(emojiFace)
+	local line = texter.shape(face, "😀😀", 24)
+	local at = starts("😀😀")
+
+	test.greater(#line.glyphs, 1, "two emoji are more than one glyph")
+
+	for index, glyph in ipairs(line.glyphs) do
+		test.truthy(at[glyph.cluster], string.format("glyph %d came from a character of the line: byte %d", index,
+			glyph.cluster))
+	end
+
+	local pen = 0.0
+
+	for _, glyph in ipairs(line.glyphs) do
+		pen = pen + glyph.advance
+	end
+
+	test.truthy(math.abs(line.width - pen) < 1.5, "and the line is as wide as its glyphs put together")
+end)
+
+test.skipIf(emojiFace == nil)("puts a caret between two emoji rather than inside one", function()
+	local face = assert(emojiFace)
+	local line = texter.shape(face, "😀😀", 24)
+	local first = texter.penOf(line, 0)
+	local second = texter.penOf(line, 4)
+	local last = texter.penOf(line, #line.text + 1)
+
+	-- A caret is placed at a byte, and what a person clicks are characters: a caret inside an emoji
+	-- -- which is what counting it in anything but bytes comes to -- is a caret halfway through a
+	-- character that has no halfway.
+	test.equal(first, 0, "the caret before the first emoji is at the start of the line")
+	test.greater(second, first, "and the one after it is where the second emoji starts")
+	test.greater(last, second, "and the end of the line is past both")
+	test.equal(texter.byteAt(line, second), 4, "and a click there is the byte that emoji starts at")
+	test.equal(texter.byteAt(line, first), 0, "and one at the start is the first byte")
+end)
+
+test.skipIf(emojiFace == nil)("shapes a sequence of emoji joined by a zero width joiner", function()
+	local face = assert(emojiFace)
+	local text = "👩‍🚀"
+	local line = texter.shape(face, text, 24)
+	local at = starts(text)
+
+	test.greater(#line.glyphs, 0, "an astronaut is one emoji or the three characters it is written as")
+	test.equal(line.glyphs[1].cluster, 0, "and what is drawn first comes from the first character")
+
+	for index, glyph in ipairs(line.glyphs) do
+		test.truthy(at[glyph.cluster],
+			string.format("glyph %d came from a character of the sequence: byte %d", index, glyph.cluster))
+	end
+
+	test.equal(texter.penOf(line, #text + 1), line.width, "and the end of it is the end of the line")
+end)
+
+test.skipIf(colourPath == nil)("gives the colours of a glyph a font draws in layers", function()
+	local face = assert(texter.face(assert(colourPath), 0))
+	local ink = face:ink(0x41, 24)
+
+	test.greater(ink.width, 0, "the glyph has ink")
+	test.truthy(ink.colour, "and it is a colour glyph: four bytes a pixel rather than coverage")
+
+	local pixels = assert(ink.pixels)
+	local seen, bright = {}, 0
+
+	for at = 0, ink.width * ink.height - 1 do
+		local blue, _, red, alpha = pixels[at * 4], pixels[at * 4 + 1], pixels[at * 4 + 2], pixels[at * 4 + 3]
+
+		if alpha > 200 then
+			bright = bright + 1
+			seen[red > 200 and "red" or (blue > 200 and "blue" or "between")] = true
+		end
+	end
+
+	test.greater(bright, 20, "and enough of it is drawn to look at")
+	test.truthy(seen.red, "the square it is made of is red")
+	test.truthy(seen.blue, "and the dot on it is blue")
+end)
+
+test.skipIf(colourPath == nil)("draws a glyph a font has an outline of as coverage rather than colour", function()
+	local face = assert(texter.face(assert(colourPath), 0))
+
+	-- The same font has a glyph with no layers at all -- the dot alone -- and what a glyph with no
+	-- picture of its own is is what is drawn from its outline: eight bits of coverage a pixel.
+	local ink = face:ink(0x42, 24)
+
+	test.greater(ink.width, 0, "the glyph has ink")
+	test.falsy(ink.colour, "and it is coverage")
+end)
+
+test.it("reads a bitmap a pixel at a time, whatever the pixels are", function()
+	local ffi = require("ffi")
+	local freetype = require("texter-freetype.freetype")
+
+	--- A buffer of bytes, filled the plain way: an array of characters whose length is written out
+	--- with the bytes beside it is a shape this LuaJIT gets wrong where another allocation is big.
+	---@param bytes string
+	---@return ffi.cdata*
+	local function buffer(bytes)
+		local out = ffi.new("unsigned char[?]", #bytes)
+
+		ffi.copy(out, bytes, #bytes)
+
+		return out
+	end
+
+	-- A monochrome bitmap: eight pixels a byte, most significant first, which is what a bitmap
+	-- font's own strike is.
+	local mono = buffer("\224\128")
+	local monoOut = ffi.new("unsigned char[?]", 16)
+
+	test.falsy(freetype.pixels(1, mono, 1, 8, 1, monoOut), "one bit a pixel is coverage when it is read")
+	test.equal(monoOut[0], 255, "the first three bits of 11100000 are drawn")
+	test.equal(monoOut[2], 255)
+	test.equal(monoOut[3], 0, "and the rest of them are not")
+	test.equal(monoOut[7], 0)
+
+	-- Coverage with a row padded to something the width is not: what is copied is the width.
+	local gray = buffer("\1\2\0\0\3\4\0\0")
+	local grayOut = ffi.new("unsigned char[?]", 4)
+
+	test.falsy(freetype.pixels(2, gray, 4, 2, 2, grayOut), "coverage is coverage")
+	test.equal(grayOut[0], 1)
+	test.equal(grayOut[1], 2)
+	test.equal(grayOut[2], 3, "and the padding between its rows is not copied")
+	test.equal(grayOut[3], 4)
+
+	-- Four bytes a pixel, which is what a colour glyph is.
+	local bgra = buffer("\10\20\30\40\50\60\70\80")
+	local bgraOut = ffi.new("unsigned char[?]", 8)
+
+	test.truthy(freetype.pixels(7, bgra, 8, 2, 1, bgraOut), "a colour glyph is four bytes a pixel")
+	test.equal(bgraOut[0], 10)
+	test.equal(bgraOut[1], 20)
+	test.equal(bgraOut[4], 50, "and a second pixel is the one after it")
+	test.equal(bgraOut[7], 80)
 end)

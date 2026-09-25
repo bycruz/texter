@@ -130,18 +130,31 @@ local NAMES = { "freetype", "libfreetype.so.6", "libfreetype.6.dylib", "freetype
 -- FT_ENC_TAG('u','n','i','c'): the character map a codepoint is looked up in.
 local UNICODE = 0x756E6963
 
--- FT_LOAD_DEFAULT, FT_RENDER_MODE_NORMAL and FT_PIXEL_MODE_GRAY: hinted, drawn as eight bits of
--- coverage a pixel, which is what an atlas packs.
+-- FT_LOAD_DEFAULT and FT_LOAD_RENDER: hinted, and drawn, in the one call that asks for a glyph.
 local LOAD_DEFAULT = 0
-local RENDER_NORMAL = 0
+local LOAD_RENDER = 4
+
+-- FT_LOAD_COLOR: a glyph whose picture is a table of its own rather than an outline -- which is what
+-- every emoji is: COLR, CBDT, sbix -- is asked for the colours it has, and what a font of those
+-- says is four bytes of them a pixel. A font without any is unaffected by this.
+local LOAD_COLOR = 0x100000
+
+-- FT_PIXEL_MODE_*: what a glyph comes back as. One bit a pixel is a bitmap font's own strike,
+-- coverage is what a drawn outline is, and four bytes of colour are an emoji.
+local PIXEL_MODE_MONO = 1
 local PIXEL_MODE_GRAY = 2
+local PIXEL_MODE_BGRA = 7
 
--- FT_LOAD_NO_BITMAP: an emoji font's picture is a table of colour bitmaps rather than an outline,
--- and what is asked for here is the outline of a glyph, so a font is not asked for its strikes.
-local LOAD_NO_BITMAP = 8
+-- How many bytes a pixel of each of those is, which is what a row of a bitmap holds.
+local PIXEL_BYTES = {
+	[PIXEL_MODE_MONO] = 1,
+	[PIXEL_MODE_GRAY] = 1,
+	[PIXEL_MODE_BGRA] = 4,
+}
 
--- How much of one glyph's ink is copied at a time, kept rather than made again: a glyph is a few
--- hundred bytes and the caller copies what it is handed before asking for the next.
+-- What of one glyph's ink is copied at a time, kept rather than made again: a glyph is a few hundred
+-- bytes and the caller copies what it is handed before asking for the next. It grows to hold a
+-- bigger glyph rather than refusing it: an emoji of a colour font is four bytes a pixel of one.
 local STACK = 1 << 16
 
 local freetype = {}
@@ -152,6 +165,8 @@ local freetype = {}
 ---@field handle texter.freetype.ffi.Face
 ---@field family string? # What the font calls itself, where it says
 ---@field style string?
+---@field private height number # The pixel height the face is at, which is what it is not asked twice
+---@field private room number # How many pixels the ink buffer holds, grown as glyphs need
 ---@field private stack ffi.cdata*
 local Face = {}
 Face.__index = Face
@@ -246,6 +261,8 @@ function freetype.open(path, index)
 		path = path,
 		index = index or 0,
 		handle = handle[0],
+		height = 0,
+		room = STACK,
 		stack = ffi.new("unsigned char[?]", STACK),
 	}, Face)
 
@@ -268,12 +285,22 @@ end
 
 --- Puts the face at the em a pixel height comes to, in sixty-fourths of a pixel: a size rounded to
 --- whole pixels is a line of text a pixel shorter than the one that was asked for.
+---
+--- A size the face is already at is not set again, and that is not a micro-optimisation: setting a
+--- size is what throws away everything FreeType has drawn and scaled for the last one, so a glyph
+--- loaded after a size that did not change is a glyph drawn from its outlines again -- about three
+--- times the work of loading one at a size that stayed put, which is what a screen packing a line
+--- of text a glyph at a time pays for every glyph on it.
 ---@param self texter.freetype.Face
 ---@param pixelHeight number
 function Face:size(pixelHeight)
 	local em = freetype.em(self.handle, pixelHeight)
 
-	library.FT_Set_Char_Size(self.handle, 0, math.floor(em * 64 + 0.5), 72, 72)
+	if self.height ~= pixelHeight then
+		library.FT_Set_Char_Size(self.handle, 0, math.floor(em * 64 + 0.5), 72, 72)
+
+		self.height = pixelHeight
+	end
 
 	return em
 end
@@ -325,40 +352,104 @@ function Face:advance(codepoint, pixelHeight)
 	return tonumber(self.handle.glyph.advance.x) / 64
 end
 
---- The ink of a glyph, copied into the buffer this face keeps: eight bits of coverage a pixel, one
---- row after another with no padding, which is what an atlas packs.
+--- A glyph with nothing to draw: what a space, a mark a shaper places by an offset, and a glyph a
+--- font has no picture of all answer with. It is one value rather than one a call, because what it
+--- says is the same every time and a line of text is mostly spaces.
+local NOTHING = { width = 0, height = 0, left = 0, top = 0 }
+
+--- What a glyph's own bitmap is worth, written into a buffer of the caller's: one kind of pixel
+--- after another, with no padding between the rows, which is what an atlas packs.
 ---
---- What comes back is the shape a caller draws or packs -- `width`, `height`, and where it sits
---- against the pen and the baseline -- and a glyph with no ink, which is a space or a mark a shaper
---- places with an offset, answers with nothing rather than with an error.
+--- One byte of coverage a pixel is what a drawn glyph is and is copied as it is. One bit a pixel --
+--- which is what a bitmap font's strike is, and what a reader scales rather than draws -- is read
+--- out as nought or two hundred and fifty-five. Four bytes a pixel are a colour glyph: an emoji, as
+--- the colours it is made of rather than as a shape, in the order FreeType hands them over -- blue,
+--- green, red and alpha, each of them multiplied by the alpha, so that what is drawn over what is
+--- under it needs no dividing.
+---@param mode number
+---@param buffer ffi.cdata* # The bitmap's bytes, as the platform handed them over
+---@param pitch number # How far one row of them is, which is not the width for anything padded
+---@param width number
+---@param height number
+---@param into ffi.cdata* # Where it is written
+---@return boolean colour # Whether four bytes a pixel were written rather than one
+function freetype.pixels(mode, buffer, pitch, width, height, into)
+	if mode == PIXEL_MODE_BGRA then
+		if pitch == width * 4 then
+			ffi.copy(into, buffer, width * height * 4)
+		else
+			for row = 0, height - 1 do
+				ffi.copy(into + row * width * 4, buffer + row * pitch, width * 4)
+			end
+		end
+
+		return true
+	end
+
+	if mode == PIXEL_MODE_MONO then
+		for row = 0, height - 1 do
+			local bits = ffi.cast("unsigned char *", buffer) + row * pitch
+			local out = row * width
+
+			for column = 0, width - 1 do
+				-- A bit a pixel, most significant first, which is how a monochrome bitmap is read.
+				local byte = bits[math.floor(column / 8)]
+				local bit = math.floor(byte / 2 ^ (7 - column % 8)) % 2
+
+				into[out + column] = bit == 1 and 255 or 0
+			end
+		end
+
+		return false
+	end
+
+	if pitch == width then
+		ffi.copy(into, buffer, width * height)
+	else
+		for row = 0, height - 1 do
+			ffi.copy(into + row * width, buffer + row * pitch, width)
+		end
+	end
+
+	return false
+end
+
+--- The ink of a glyph, copied into the buffer this face keeps: what a caller draws or packs.
+---
+--- What comes back is the shape of it -- `width`, `height`, and where it sits against the pen and
+--- the baseline -- and a glyph with no ink, which is a space or a mark a shaper places with an
+--- offset, answers with nothing rather than with an error. What a colour glyph answers with is
+--- `colour`: four bytes a pixel rather than one, which is what an emoji is.
 ---@param glyph number
 ---@param pixelHeight number
 ---@return texter.Ink
 function Face:inkOf(glyph, pixelHeight)
 	self:size(pixelHeight)
 
-	library.FT_Load_Glyph(self.handle, glyph, LOAD_DEFAULT + LOAD_NO_BITMAP)
+	-- One call for the whole of it: the glyph is asked for the colours it has, which a font that has
+	-- none ignores, and drawn, which a glyph whose picture is a table of its own does not need.
+	if library.FT_Load_Glyph(self.handle, glyph, LOAD_DEFAULT + LOAD_RENDER + LOAD_COLOR) ~= 0 then
+		return NOTHING
+	end
 
 	local slot = self.handle.glyph
-
-	if library.FT_Render_Glyph(slot, RENDER_NORMAL) ~= 0 then
-		return { width = 0, height = 0, left = 0, top = 0 }
-	end
-
 	local bitmap = slot.bitmap
-
-	if bitmap.pixel_mode ~= PIXEL_MODE_GRAY or bitmap.width == 0 or bitmap.rows == 0 then
-		return { width = 0, height = 0, left = 0, top = 0 }
-	end
-
+	local mode = bitmap.pixel_mode
 	local width, height = tonumber(bitmap.width), tonumber(bitmap.rows)
+	local bytes = PIXEL_BYTES[mode]
 
-	assert(width * height <= STACK, "A glyph is larger than the buffer it is copied into")
-
-	-- A bitmap's rows are padded to a pitch of their own, and what an atlas packs has none.
-	for row = 0, height - 1 do
-		ffi.copy(self.stack + row * width, bitmap.buffer + row * tonumber(bitmap.pitch), width)
+	if bytes == nil or width == 0 or height == 0 then
+		return NOTHING
 	end
+
+	local room = width * height * bytes
+
+	if room > self.room then
+		self.room = room
+		self.stack = ffi.new("unsigned char[?]", self.room)
+	end
+
+	local colour = freetype.pixels(mode, bitmap.buffer, tonumber(bitmap.pitch), width, height, self.stack)
 
 	-- Where the ink sits: FreeType says how far the top of the bitmap is above the baseline, and
 	-- what a caller wants is how far down the screen it is.
@@ -368,6 +459,7 @@ function Face:inkOf(glyph, pixelHeight)
 		left = tonumber(slot.bitmap_left),
 		top = -tonumber(slot.bitmap_top),
 		pixels = self.stack,
+		colour = colour or nil,
 	}
 end
 

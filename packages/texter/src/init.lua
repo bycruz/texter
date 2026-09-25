@@ -61,14 +61,24 @@ local BACKENDS = {
 ---@field path string
 ---@field index number
 
---- The ink of a glyph, as eight bits of coverage a pixel: its size, and where it sits against the
---- pen and the baseline.
+--- The ink of a glyph: its size, where it sits against the pen and the baseline, and its pixels.
+---
+--- What a glyph is drawn from is eight bits of coverage a pixel, one row after another with no
+--- padding between them, and that is what `pixels` holds. A glyph a font draws in colours of its own
+--- -- an emoji, which is a picture rather than a shape -- is four bytes a pixel instead, and what
+--- says which is `colour`. What the four bytes are in is the platform's own order (FreeType hands
+--- over blue, green, red and alpha, each multiplied by the alpha), so a caller that packs them reads
+--- the channels it knows rather than assuming red first.
+---
+--- The pixels are the reader's own buffer, which the next glyph it is asked for is written into: what
+--- a caller keeps, it copies first. `pixels` is nought where a glyph has no ink at all.
 ---@class texter.Ink
 ---@field width number
 ---@field height number
 ---@field left number
 ---@field top number
 ---@field pixels ffi.cdata*?
+---@field colour boolean? # Four bytes a pixel rather than one of coverage
 
 --- What a string comes to when it is shaped.
 ---@class texter.ShapeOpts

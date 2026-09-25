@@ -17,6 +17,10 @@ local freetype = require("texter-freetype.freetype")
 local harfbuzz = require("texter-freetype.harfbuzz")
 local utf8 = require("texter-common").utf8
 
+-- An array of a known size, made in one go rather than grown a rehash at a time: what a line is is
+-- a table of a glyph each, which is the one table a caller is handed and the one worth sizing.
+local table_new = require("table.new")
+
 local texter = {}
 
 -- The bytes of each face, and the shaped fonts made from them: what a shaper is handed is the
@@ -101,22 +105,21 @@ function texter.shape(face, text, pixelHeight, opts)
 	local runs, rtl = bidi.paragraph(text, characters, opts)
 	local font = texter.fontOf(face, pixelHeight)
 
-	local glyphs, pen, x = {}, 0.0, 0.0
+	-- What a line is is its glyphs one after another, so they are written where the line keeps them
+	-- rather than a run at a time and gathered afterwards: a run is shaped from the bytes of the
+	-- line it is, and what it comes to is placed where the runs before it got to.
+	local glyphs, count, x = table_new(string.len(text), 0), 0, 0.0
 
 	for _, run in ipairs(runs) do
-		local shaped, width = harfbuzz.shape(font, text:sub(run.first, run.last), {
+		local shaped, width = harfbuzz.shape(font, text, {
 			direction = run.rtl and "rtl" or "ltr",
 			language = opts and opts.language,
-		})
+			from = run.first,
+			to = run.last,
+			x = x,
+		}, glyphs, count)
 
-		-- Where a glyph is and which byte it came from are both about the whole line: HarfBuzz
-		-- answers about the run it was given, which starts where the run does.
-		for _, glyph in ipairs(shaped) do
-			glyph.x = glyph.x + x
-			glyph.cluster = glyph.cluster + run.first - 1
-			glyphs[#glyphs + 1] = glyph
-		end
-
+		count = count + shaped
 		x = x + width
 	end
 

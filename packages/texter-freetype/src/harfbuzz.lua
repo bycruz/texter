@@ -67,6 +67,7 @@ ffi.cdef [[
 	void hb_font_set_ppem(hb_font_t *font, unsigned int x_ppem, unsigned int y_ppem);
 	hb_buffer_t *hb_buffer_create(void);
 	void hb_buffer_destroy(hb_buffer_t *buffer);
+	void hb_buffer_clear_contents(hb_buffer_t *buffer);
 	void hb_buffer_add_utf8(hb_buffer_t *buffer, const char *text, int length, unsigned int offset, int item_length);
 	void hb_buffer_set_direction(hb_buffer_t *buffer, hb_direction_t direction);
 	void hb_buffer_set_script(hb_buffer_t *buffer, hb_script_t script);
@@ -127,8 +128,13 @@ for _, name in ipairs(NAMES) do
 end
 
 -- One buffer for the process, emptied before each run: a buffer is a few tables of glyphs, and one
--- made and thrown away for every line of every frame is churn the collector pays for.
+-- made and thrown away for every line of every frame is churn the collector pays for. What is emptied
+-- is what it holds rather than the buffer itself, which is the difference between a line costing a
+-- buffer and costing nothing.
 local buffer = nil
+
+-- What HarfBuzz answers the count of a buffer in, kept for the same reason.
+local counted = ffi.new("unsigned int[1]")
 
 --- Whether this machine has the HarfBuzz a string is shaped with.
 ---@return boolean
@@ -162,8 +168,16 @@ end
 function harfbuzz.font(content, index, em)
 	assert(library, harfbuzz.why())
 
-	local bytes = ffi.cast("const char *", ffi.new("char[?]", #content, content))
-	local blob = library.hb_blob_create(bytes, #content, DUPLICATE, nil, nil)
+	-- The bytes of the file are copied into a buffer of this call's own rather than handed to
+	-- `ffi.new` as an initialiser: an array of characters whose length is written out with the bytes
+	-- beside it is a shape this LuaJIT gets wrong, and what it does instead is corrupt the heap
+	-- where the writing is not seen until something else is swept -- see the note in this
+	-- repository's AGENTS.md.
+	local bytes = ffi.new("char[?]", #content)
+
+	ffi.copy(bytes, content, #content)
+
+	local blob = library.hb_blob_create(ffi.cast("const char *", bytes), #content, DUPLICATE, nil, nil)
 	local face = library.hb_face_create(blob, index or 0)
 	local font = library.hb_font_create(face)
 
@@ -193,31 +207,44 @@ function harfbuzz.free(font, blob, face)
 	library.hb_blob_destroy(blob)
 end
 
---- Shapes one run of text: the glyphs it is drawn from, in the order they are drawn in, each with
---- where it came from in the string.
+--- Shapes one run of text into the glyphs it is drawn from, in the order they are drawn in, each
+--- with where it came from in the string.
 ---
 --- A run is one direction of one script -- what the bidi algorithm and the script of the text
 --- decide -- and what is handed in is that run alone: `direction` is "ltr" or "rtl", and the script
---- is worked out from the characters where it is not named.
+--- is worked out from the characters where it is not named. The run is a stretch of `text` and not a
+--- string of its own, because a line of three runs is three substrings the collector would pay for.
+---
+--- What comes out is written where a caller keeps its line: `into` from `at`, one glyph after
+--- another, because what a line is *is* its glyphs one after another and a run of it is not a thing
+--- to be held in between.
 ---@param font ffi.cdata*
 ---@param text string
----@param opts { direction: "ltr" | "rtl"?, script: string?, language: string? }
----@return texter.Glyph[] glyphs
----@return number width
-function harfbuzz.shape(font, text, opts)
+---@param opts { direction: "ltr" | "rtl"?, script: string?, language: string?, from: number?, to: number?, x: number? }
+---@param into texter.Glyph[]
+---@param at number # How many glyphs are already in it
+---@return number count # How many were written
+---@return number width # How wide the run is
+function harfbuzz.shape(font, text, opts, into, at)
 	assert(library, harfbuzz.why())
-	assert(#text > 0, "A run of nothing is not a run")
+
+	local from = (opts.from or 1) - 1
+	local to = opts.to or #text
+	local length = to - from
+
+	assert(length > 0, "A run of nothing is not a run")
 
 	if buffer == nil then
 		buffer = library.hb_buffer_create()
 	else
-		-- The buffer keeps what was shaped in it until it is emptied, and what a run is shaped from
-		-- is this run alone.
-		library.hb_buffer_destroy(buffer)
-		buffer = library.hb_buffer_create()
+		-- What the buffer holds is emptied rather than the buffer given back: it is the same room
+		-- for the next run, and a run of a line of a frame is a line of a frame.
+		library.hb_buffer_clear_contents(buffer)
 	end
 
-	library.hb_buffer_add_utf8(buffer, text, #text, 0, #text)
+	-- The stretch of the line this run is: what HarfBuzz is handed is where it starts in the line
+	-- and how far it goes, so that the clusters it answers with are bytes of the *line*.
+	library.hb_buffer_add_utf8(buffer, text, #text, from, length)
 
 	if opts.direction ~= nil then
 		library.hb_buffer_set_direction(buffer, DIRECTION[opts.direction])
@@ -231,23 +258,25 @@ function harfbuzz.shape(font, text, opts)
 
 	library.hb_shape(font, buffer, nil, 0)
 
-	local count = ffi.new("unsigned int[1]")
-	local infos = library.hb_buffer_get_glyph_infos(buffer, count)
-	local positions = library.hb_buffer_get_glyph_positions(buffer, count)
-	local glyphs, pen = {}, 0.0
+	local infos = library.hb_buffer_get_glyph_infos(buffer, counted)
+	local positions = library.hb_buffer_get_glyph_positions(buffer, counted)
+	local count = tonumber(counted[0])
+	local x, pen = opts.x or 0.0, 0.0
 
 	---@cast infos texter.harfbuzz.ffi.GlyphInfo
 	---@cast positions texter.harfbuzz.ffi.GlyphPosition
 
-	for index = 0, tonumber(count[0]) - 1 do
+	for index = 0, count - 1 do
 		local info = infos[index]
 		local position = positions[index]
 		local advance = tonumber(position.x_advance) / 64
 
-		glyphs[#glyphs + 1] = {
+		into[at + index + 1] = {
 			glyph = info.codepoint,
-			cluster = info.cluster,
-			x = pen + tonumber(position.x_offset) / 64,
+			-- What HarfBuzz answers a cluster as is the byte of the line this run is a stretch of,
+			-- which is what a caret is placed by.
+			cluster = tonumber(info.cluster),
+			x = x + pen + tonumber(position.x_offset) / 64,
 			y = -tonumber(position.y_offset) / 64,
 			advance = advance,
 		}
@@ -255,7 +284,7 @@ function harfbuzz.shape(font, text, opts)
 		pen = pen + advance
 	end
 
-	return glyphs, pen
+	return count, pen
 end
 
 return harfbuzz

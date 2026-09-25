@@ -62,17 +62,65 @@ test.it("says where in the string each character is", function()
 	local characters = utf8.characters("a日b")
 
 	test.equal(characters.count, 3)
-	test.equal(characters.offsets[1], 1, "the first is the first byte")
-	test.equal(characters.offsets[2], 2, "and the one after a three byte character is the fourth")
-	test.equal(characters.offsets[3], 5)
-	test.equal(characters.codepoints[2], 0x65E5)
+	test.equal(characters.codepoints[0], 0x61, "the first character is the first")
+	test.equal(characters.offsets[0], 1, "and starts at the first byte")
+	test.equal(characters.codepoints[1], 0x65E5)
+	test.equal(characters.offsets[1], 2, "the one after it starts at the second byte")
+	test.equal(characters.codepoints[2], 0x62)
+	test.equal(characters.offsets[2], 5, "and a three byte character takes three")
+end)
+
+test.it("reads an emoji as one character of four bytes", function()
+	local characters = utf8.characters("😀!")
+
+	test.equal(characters.count, 2, "a character outside the basic plane is one character")
+	test.equal(characters.codepoints[0], 0x1F600)
+	test.equal(characters.offsets[0], 1)
+	test.equal(characters.codepoints[1], 0x21)
+	test.equal(characters.offsets[1], 5, "and the byte after it is the fifth")
 end)
 
 test.it("reads nothing out of a string that is not there", function()
 	local characters = utf8.characters("")
 
 	test.equal(characters.count, 0)
-	test.equal(#characters.offsets, 0)
+end)
+
+test.it("reads a string as the UTF-16 a platform counts a line in", function()
+	local units = utf8.units("a😀b")
+
+	test.equal(units.count, 4, "an emoji is two units")
+	test.equal(units.units[0], 0x61)
+	test.equal(units.offsets[0], 1)
+	test.equal(units.units[1], 0xD83D, "the high half of the pair")
+	test.equal(units.units[2], 0xDE00, "and the low half of it")
+	test.equal(units.offsets[1], 2, "both of which are the byte the character starts at")
+	test.equal(units.offsets[2], 2)
+	test.equal(units.units[3], 0x62)
+	test.equal(units.offsets[3], 6, "and the byte after an emoji is the sixth")
+end)
+
+test.it("writes a codepoint back out as the bytes it is", function()
+	test.equal(utf8.encode(0x61), "a")
+	test.equal(utf8.encode(0xF6), "ö")
+	test.equal(utf8.encode(0x65E5), "日")
+	test.equal(utf8.encode(0x1F600), "😀")
+
+	local characters = utf8.characters("aö日😀")
+
+	for index = 0, characters.count - 1 do
+		test.equal(utf8.encode(characters.codepoints[index]), string.sub("aö日😀", characters.offsets[index],
+			characters.offsets[index] + #utf8.encode(characters.codepoints[index]) - 1),
+			string.format("character %d is the bytes it came from", index))
+	end
+end)
+
+test.it("hands the same buffer back rather than a table a call", function()
+	local first = utf8.characters("abc")
+	local second = utf8.characters("de")
+
+	test.equal(first, second, "what comes back is the buffer this module keeps")
+	test.equal(second.count, 2, "and it says what the last call read")
 end)
 
 test.skipIf(fontPath == nil)("reads the family a font file says it is", function()

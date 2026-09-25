@@ -96,6 +96,11 @@ ffi.cdef [[
 	uint32_t CTRunGetStatus(CTRunRef run);
 
 	CGColorSpaceRef CGColorSpaceCreateDeviceGray(void);
+	void CGColorSpaceRelease(CGColorSpaceRef space);
+	void CGColorRelease(CGColorRef colour);
+	void CGContextRelease(CGContextRef context);
+	void CGContextSaveGState(CGContextRef context);
+	void CGContextRestoreGState(CGContextRef context);
 	CGContextRef CGBitmapContextCreate(void *data, size_t width, size_t height, size_t bitsPerComponent,
 		size_t bytesPerRow, CGColorSpaceRef space, uint32_t bitmapInfo);
 	CGColorRef CGColorCreateGenericGray(CGFloat gray, CGFloat alpha);
@@ -110,6 +115,12 @@ ffi.cdef [[
 
 -- kCFStringEncodingUTF8 and kCFStringEncodingASCII: the two ways a string is handed in.
 local ENCODING_UTF8 = 0x08000100
+
+-- kCFStringEncodingUTF16LE: the string CoreText is handed is built from the units this module read,
+-- in the byte order of the machine, so that what a run's indices are indices *of* is the same text a
+-- caret is counted in -- a string built from the bytes instead is a string CoreText decodes itself,
+-- and a string that is not text is then two strings that are not the same length.
+local ENCODING_UTF16LE = 0x14000100
 local ENCODING_ASCII = 0x0600
 
 -- kCTRunStatusRightToLeft: a run that is set right to left, which is the first bit of the status
@@ -137,6 +148,14 @@ local coretext = {}
 ---@field descriptor CTFontDescriptorRef
 ---@field fonts table<number, CTFontRef> # One for each pixel height it has been asked for
 ---@field scale number # The size a font is made at for one pixel of line height
+---@field private canvas ffi.cdata*? # The bitmap context glyphs are drawn into, kept
+---@field private canvasPixels ffi.cdata*? # What it draws into, kept
+---@field private canvasWidth number # How wide that is, which is what a row of it is
+---@field private canvasHeight number
+---@field private room number # How many pixels the compact copy of a glyph holds
+---@field private stack ffi.cdata*?
+---@field private space ffi.cdata*? # The grey colour space every canvas of this face is made in
+---@field private colour ffi.cdata*? # What a glyph is drawn in
 local Face = {}
 
 ---@return boolean
@@ -164,43 +183,24 @@ local function stringOf(bytes, encoding)
 	return core.CFStringCreateWithCString(nil, bytes, encoding)
 end
 
---- The UTF-16 a CoreText string is, and where each of its characters starts in the UTF-8 string it
---- was made from: CoreText counts a line in UTF-16 units and a caret is placed by a byte, and the
---- two are not the same length for anything outside the basic plane.
----@param text string
----@return UniChar* wide
----@return number[] bytes # The byte of the UTF-8 string each UTF-16 unit starts at
----@return number count
-local function wideOf(text)
-	local characters = utf8.characters(text)
-	local units = {}
-	local bytes = {}
+-- What one run of a line is asked for and what it answers with, kept and grown rather than made
+-- again: a line is a run or two and a frame is a line or a hundred, and three arrays a run are three
+-- arrays the collector pays for. What they hold is read before the next run rather than kept.
+local room = 0
 
-	for index = 1, characters.count do
-		local codepoint = characters.codepoints[index]
-		local at = characters.offsets[index]
+---@type ffi.cdata*
+local glyphBuffer, positionBuffer, indexBuffer = nil, nil, nil
 
-		if codepoint < 0x10000 then
-			units[#units + 1] = codepoint
-			bytes[#bytes + 1] = at
-		else
-			local point = codepoint - 0x10000
-
-			units[#units + 1] = 0xD800 + math.floor(point / 0x400)
-			bytes[#bytes + 1] = at
-			units[#units + 1] = 0xDC00 + point % 0x400
-			bytes[#bytes + 1] = at
-		end
+---@param count number
+local function grow(count)
+	if room >= count then
+		return
 	end
 
-	local count = #units
-	local buffer = ffi.new("UniChar[?]", count + 1)
-
-	for index = 1, count do
-		buffer[index - 1] = units[index]
-	end
-
-	return buffer, bytes, count
+	room = count
+	glyphBuffer = ffi.new("CGGlyph[?]", room)
+	positionBuffer = ffi.new("CGPoint[?]", room)
+	indexBuffer = ffi.new("CFIndex[?]", room)
 end
 
 --- Reads a font file: macOS registers a font by URL and hands back what it is, which is a font made
@@ -252,6 +252,14 @@ function coretext.face(path, index)
 		descriptor = descriptor,
 		fonts = {},
 		scale = 0,
+		canvas = nil,
+		canvasPixels = nil,
+		canvasWidth = 0,
+		canvasHeight = 0,
+		room = 0,
+		stack = nil,
+		space = nil,
+		colour = nil,
 	}, { __index = Face })
 
 	-- A pixel height is how tall a *line* of text is here, and CoreText is asked for a size in
@@ -307,14 +315,33 @@ function Face:metrics(pixelHeight)
 	return ascent, -descent, leading > 0 and leading or 0, line
 end
 
+--- The glyph a codepoint is in this font, or nought where it is not one of its own.
+---
+--- A codepoint is not a unit, and what CoreText is asked about characters in is UTF-16 units: a
+--- character outside the basic plane -- which every emoji is -- is two units that are one character,
+--- so what is handed over is the pair of them, and the glyph that comes back is in the first place
+--- the answer has room for.
 ---@param codepoint number
+---@param pixelHeight number
 ---@return number
 function Face:glyphFor(codepoint, pixelHeight)
 	local font = self:font(pixelHeight)
-	local characters = ffi.new("UniChar[1]", codepoint)
-	local glyphs = ffi.new("CGGlyph[1]")
+	local characters = ffi.new("UniChar[2]")
+	local count = 1
 
-	if coreText.CTFontGetGlyphsForCharacters(font, characters, glyphs, 1) == 0 then
+	if codepoint >= 0x10000 then
+		local point = codepoint - 0x10000
+
+		characters[0] = 0xD800 + math.floor(point / 0x400)
+		characters[1] = 0xDC00 + point % 0x400
+		count = 2
+	else
+		characters[0] = codepoint
+	end
+
+	local glyphs = ffi.new("CGGlyph[2]")
+
+	if coreText.CTFontGetGlyphsForCharacters(font, characters, glyphs, count) == 0 then
 		return 0
 	end
 
@@ -340,6 +367,11 @@ function Face:advance(codepoint, pixelHeight)
 	return tonumber(sizes[0].width)
 end
 
+--- A glyph with nothing to draw: a space, a mark a shaper places by an offset, and a glyph a font
+--- has no picture of all answer with it. It is one value rather than one a call, because what it says
+--- is the same every time and a line of text is mostly spaces.
+local NOTHING = { width = 0, height = 0, left = 0, top = 0 }
+
 ---@param glyph number
 ---@param pixelHeight number
 ---@return texter.Ink
@@ -355,12 +387,86 @@ function Face:inkOf(glyph, pixelHeight)
 	local height = math.ceil(tonumber(bounds.size.height))
 
 	if width <= 0 or height <= 0 then
-		return { width = 0, height = 0, left = 0, top = 0 }
+		return NOTHING
 	end
 
-	local space = coreGraphics.CGColorSpaceCreateDeviceGray()
-	local data = ffi.new("unsigned char[?]", width * height)
-	local context = coreGraphics.CGBitmapContextCreate(data, width, height, 8, width, space, 0)
+	local context, pixels = self:canvasFor(width, height)
+
+	-- What is drawn into is cleared first: what a context keeps is what was drawn into it, and a
+	-- glyph drawn over another glyph is neither of them.
+	ffi.fill(pixels, self.canvasWidth * self.canvasHeight, 0)
+
+	-- A bitmap context is bottom up and a glyph is drawn from the baseline: the origin is put where
+	-- the glyph's own box starts, which is what the bounding rectangle says, and the y is turned
+	-- around so that what is drawn is the right way up in the bitmap. What is drawn moves the
+	-- context's own origin, so the state goes back the way it was drawn in.
+	local positions = ffi.new("CGPoint[1]")
+
+	positions[0].x, positions[0].y = 0, 0
+
+	coreGraphics.CGContextSaveGState(context)
+	coreGraphics.CGContextTranslateCTM(context, -tonumber(bounds.origin.x), -tonumber(bounds.origin.y))
+	coreText.CTFontDrawGlyphs(font, glyphs, positions, 1, context)
+	coreGraphics.CGContextRestoreGState(context)
+
+	-- What an atlas packs is a glyph's rows one after another with no padding, and what a context
+	-- draws into is rows of the width it was made at: the glyph's own part of each row is copied out.
+	local room = width * height
+
+	if room > self.room then
+		self.room = room
+		self.stack = ffi.new("unsigned char[?]", room)
+	end
+
+	local stack = assert(self.stack)
+
+	if self.canvasWidth == width then
+		ffi.copy(stack, pixels, room)
+	else
+		for row = 0, height - 1 do
+			ffi.copy(stack + row * width, pixels + row * self.canvasWidth, width)
+		end
+	end
+
+	return {
+		width = width,
+		height = height,
+		left = math.floor(tonumber(bounds.origin.x)),
+		top = -math.floor(tonumber(bounds.origin.y) + tonumber(bounds.size.height)),
+		pixels = stack,
+	}
+end
+
+--- The bitmap a glyph is drawn into: one for the whole face, made the first time it is drawn into
+--- and made again only when a glyph is larger than it -- which is a few times in the life of a face
+--- rather than once a glyph, and what a context a glyph is a context the machine made and gave
+--- nothing back of.
+---
+--- What comes back is the context and its pixels, and the pixels are as wide as the context rather
+--- than as wide as the glyph: a row of a glyph is a row of the context trimmed to it.
+---@param self texter.coretext.Face
+---@param width number
+---@param height number
+---@return CGContextRef context
+---@return ffi.cdata* pixels
+function Face:canvasFor(width, height)
+	if self.canvas ~= nil and width <= self.canvasWidth and height <= self.canvasHeight then
+		return self.canvas, self.canvasPixels
+	end
+
+	local wide = math.max(width, self.canvasWidth * 2)
+	local high = math.max(height, self.canvasHeight * 2)
+
+	if self.canvas ~= nil then
+		coreGraphics.CGContextRelease(self.canvas)
+	end
+
+	if self.space == nil then
+		self.space = coreGraphics.CGColorSpaceCreateDeviceGray()
+	end
+
+	local pixels = ffi.new("unsigned char[?]", wide * high)
+	local context = coreGraphics.CGBitmapContextCreate(pixels, wide, high, 8, wide, self.space, 0)
 
 	coreGraphics.CGContextSetAllowsAntialiasing(context, 1)
 	coreGraphics.CGContextSetShouldAntialias(context, 1)
@@ -369,27 +475,16 @@ function Face:inkOf(glyph, pixelHeight)
 	coreGraphics.CGContextSetShouldSmoothFonts(context, 0)
 	coreGraphics.CGContextSetShouldSubpixelQuantizeFonts(context, 0)
 
-	-- A bitmap context is bottom up and a glyph is drawn from the baseline: the origin is put where
-	-- the glyph's own box starts, which is what the bounding rectangle says, and the y is turned
-	-- around so that what is drawn is the right way up in the bitmap.
-	local colour = coreGraphics.CGColorCreateGenericGray(1.0, 1.0)
+	if self.colour == nil then
+		self.colour = coreGraphics.CGColorCreateGenericGray(1.0, 1.0)
+	end
 
-	coreGraphics.CGContextSetFillColorWithColor(context, colour)
+	coreGraphics.CGContextSetFillColorWithColor(context, self.colour)
 	coreGraphics.CGContextSetTextMatrix(context, ffi.new("CGAffineTransform", 1, 0, 0, 1, 0, 0))
-	coreGraphics.CGContextTranslateCTM(context, -tonumber(bounds.origin.x), -tonumber(bounds.origin.y))
 
-	local positions = ffi.new("CGPoint[1]")
+	self.canvas, self.canvasPixels, self.canvasWidth, self.canvasHeight = context, pixels, wide, high
 
-	positions[0].x, positions[0].y = 0, 0
-	coreText.CTFontDrawGlyphs(font, glyphs, positions, 1, context)
-
-	return {
-		width = width,
-		height = height,
-		left = math.floor(tonumber(bounds.origin.x)),
-		top = -math.floor(tonumber(bounds.origin.y) + tonumber(bounds.size.height)),
-		pixels = data,
-	}
+	return context, pixels
 end
 
 ---@param codepoint number
@@ -412,13 +507,15 @@ end
 ---@return texter.Line
 function coretext.shape(face, text, pixelHeight, _opts)
 	local font = face:font(pixelHeight)
-	local _, bytes = wideOf(text)
+	local wide = utf8.units(text)
+	local characters = wide.units
+	local bytes = wide.offsets
 
 	-- What the line is made of is a string of the framework's own, and it is not a local called
 	-- `string`: that is what a caller formats with, and one of that name here would make every use
 	-- of it in this function read a field of a font instead.
-	local cfText = core.CFStringCreateWithBytes(nil, ffi.cast("const unsigned char *", text), #text,
-		ENCODING_UTF8, 0)
+	local cfText = core.CFStringCreateWithBytes(nil, ffi.cast("const unsigned char *", characters),
+		wide.count * 2, ENCODING_UTF16LE, 0)
 
 	-- The attribute CoreText is told the font by is the name "NSFont", which is what the framework's
 	-- own constant is: a string made here is the same string.
@@ -440,15 +537,18 @@ function coretext.shape(face, text, pixelHeight, _opts)
 	---@param unit number
 	---@return number
 	local function byteOf(unit)
-		return (bytes[math.max(unit, 0) + 1] or (#text + 1)) - 1
+		local at = unit >= 0 and bytes[unit] or nil
+
+		return (at or (#text + 1)) - 1
 	end
 
 	for index = 0, tonumber(core.CFArrayGetCount(runs)) - 1 do
 		local run = ffi.cast("CTRunRef", core.CFArrayGetValueAtIndex(runs, index))
 		local glyphCount = tonumber(coreText.CTRunGetGlyphCount(run))
-		local out = ffi.new("CGGlyph[?]", glyphCount)
-		local positions = ffi.new("CGPoint[?]", glyphCount)
-		local indices = ffi.new("CFIndex[?]", glyphCount)
+
+		grow(glyphCount)
+
+		local out, positions, indices = glyphBuffer, positionBuffer, indexBuffer
 		-- What a run is asked for is a range of *its* glyphs, which is all of them: the whole run is
 		-- what is shaped, and a line that needs half of one is not a line yet.
 		local range = ffi.new("CFRange", 0, glyphCount)

@@ -104,7 +104,7 @@ end
 local function oneRun(text, characters)
 	local rtl = false
 
-	for index = 1, characters.count do
+	for index = 0, characters.count - 1 do
 		local codepoint = characters.codepoints[index]
 
 		-- Letters only: a digit or a space says nothing about the direction of a line.
@@ -115,6 +115,28 @@ local function oneRun(text, characters)
 	end
 
 	return { { first = 1, last = #text, rtl = rtl, level = rtl and 1 or 0 } }, rtl
+end
+
+-- What the algorithm is handed and what it answers with, kept and grown rather than made again: a
+-- level a character, a type a character, and the base direction of the paragraph. A line is cut into
+-- runs once a frame in a screen that rebuilds its view, and three buffers a call are three buffers
+-- the collector then has to pay for. None of them leaves this module, so what they hold is read
+-- before the next call rather than kept.
+local room = 0
+
+---@type ffi.cdata*
+local types, levels, base = nil, nil, nil
+
+---@param count number
+local function grow(count)
+	if room >= count then
+		return
+	end
+
+	room = count
+	types = ffi.new("FriBidiCharType[?]", room)
+	levels = ffi.new("FriBidiLevel[?]", room)
+	base = base or ffi.new("FriBidiParType[1]")
 end
 
 --- A line cut into runs, in the order a screen draws them.
@@ -137,17 +159,13 @@ function bidi.paragraph(text, characters, opts)
 	end
 
 	local count = characters.count
-	local codepoints = ffi.new("FriBidiChar[?]", count)
-	local types = ffi.new("FriBidiCharType[?]", count)
-	local levels = ffi.new("FriBidiLevel[?]", count)
 
-	for index = 1, count do
-		codepoints[index - 1] = characters.codepoints[index]
-	end
+	grow(count)
 
-	library.fribidi_get_bidi_types(codepoints, count, types)
-
-	local base = ffi.new("FriBidiParType[1]")
+	-- What a character is -- a letter, a number, a space -- is what the algorithm works on, and what
+	-- the characters of the line are is already a buffer of its own: a codepoint of a string read as
+	-- UTF-8 is the same number of the same width the algorithm wants.
+	library.fribidi_get_bidi_types(characters.codepoints, count, types)
 
 	base[0] = (opts and opts.direction) == "rtl" and PAR_RTL
 		or ((opts and opts.direction) == "ltr" and PAR_LTR or PAR_ON)
@@ -155,29 +173,28 @@ function bidi.paragraph(text, characters, opts)
 	library.fribidi_get_par_embedding_levels(types, count, base, levels)
 
 	-- The runs, in the order the line reads in -- which is not the order it is drawn in where any
-	-- of it is right to left.
+	-- of it is right to left. What a run covers is the bytes of it: from the byte its first
+	-- character starts at to the byte before its next one, or the end of the line.
 	local runs, current = {}, nil
 
 	for index = 0, count - 1 do
 		local level = levels[index]
 		local rtl = level % 2 == 1
+		local last = index + 1 < count and characters.offsets[index + 1] - 1 or #text
 
 		if current ~= nil and current.rtl == rtl then
-			current.last = characters.offsets[index + 1] + 1
+			current.last = last
 		else
-			local first = characters.offsets[index + 1]
-
-			current = { first = first, last = first, rtl = rtl, level = level }
+			current = { first = characters.offsets[index], last = last, rtl = rtl, level = level }
 			runs[#runs + 1] = current
 		end
 	end
 
-	-- The last run ends at the end of the line, which is not the byte after its last character.
-	runs[#runs].last = #text
-
 	-- L2 of the algorithm, over runs rather than characters: from the deepest level up to the
 	-- shallowest odd one, every stretch of runs at that level or deeper is turned around. A run is
-	-- one level throughout, so what a stretch of characters is there is a stretch of runs here.
+	-- one level throughout, so what a stretch of characters is there is a stretch of runs here --
+	-- and the runs of a line are one after another in it, so what is turned around is turned around
+	-- where they are rather than in a table of their own.
 	local deepest = 0
 	local shallowestOdd = nil
 
@@ -191,30 +208,22 @@ function bidi.paragraph(text, characters, opts)
 		end
 	end
 
-	local order = {}
-
-	for index = 1, #runs do
-		order[index] = index
-	end
-
 	if shallowestOdd ~= nil then
 		for level = deepest, shallowestOdd, -1 do
 			local index = 1
 
-			while index <= #order do
-				if runs[order[index]].level >= level then
+			while index <= #runs do
+				if runs[index].level >= level then
 					local last = index
 
-					while last < #order and runs[order[last + 1]].level >= level do
+					while last < #runs and runs[last + 1].level >= level do
 						last = last + 1
 					end
 
-					-- Turned around in place: what the algorithm does at this level is what makes a
-					-- right to left stretch read the way it does inside a left to right line.
 					local left, right = index, last
 
 					while left < right do
-						order[left], order[right] = order[right], order[left]
+						runs[left], runs[right] = runs[right], runs[left]
 						left, right = left + 1, right - 1
 					end
 
@@ -226,13 +235,7 @@ function bidi.paragraph(text, characters, opts)
 		end
 	end
 
-	local visual = {}
-
-	for index, at in ipairs(order) do
-		visual[index] = runs[at]
-	end
-
-	return visual, base[0] == PAR_RTL
+	return runs, base[0] == PAR_RTL
 end
 
 return bidi

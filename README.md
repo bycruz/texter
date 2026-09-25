@@ -14,7 +14,9 @@ the desktop can display:
 - **Devanagari, Thai, Khmer, Myanmar** are reordered and stacked by the script's own rules.
 - **Chinese, Japanese, Korean** are read out of fonts whose outlines are CFF, which a reader of
   TrueType outlines alone cannot open.
-- **Emoji** come as the font's own bitmaps and layers.
+- **Emoji** come as the font's own picture of them -- the layers of a COLR font, the bitmaps of a
+  CBDT or sbix one -- and not as a shape with nothing in it. What is handed back for one of those is
+  four bytes of colour a pixel rather than one of coverage: see `texter.Ink`.
 - **A line of two directions** -- a word of Arabic inside a line of English -- is cut into runs and
   put in the order a screen draws them.
 
@@ -85,7 +87,7 @@ lde run -C examples/shapes
 | `texter.why()` | what is missing, where it is missing |
 | `texter.face(path, index?)` | a font file read: a whole file, one font of a collection, at any size afterwards |
 | `texter.shape(face, text, pixelHeight, opts?)` | a line: the glyphs it is drawn from, where each goes, and which byte of the string it came from |
-| `texter.ink(face, glyph, pixelHeight)` | one glyph of a font: eight bits of coverage a pixel, its size, and where it sits |
+| `texter.ink(face, glyph, pixelHeight)` | one glyph of a font: its size, where it sits, and its pixels -- coverage, or colour for a glyph a font draws as a picture |
 | `texter.metrics(face, pixelHeight)` | how tall a line of it is: above the baseline, below it, and the gap between lines |
 | `texter.penOf(line, byte)` | where a caret for a byte of the line goes |
 | `texter.byteAt(line, x)` | which byte of the line a point is over |
@@ -115,12 +117,13 @@ It is not an em size, and it is not the size a font file says.
 | | linux | windows | macOS |
 | - | ----- | ------- | ----- |
 | machine | Nobara 44 (KDE), x86_64 | Windows 10.0.26200, x86_64 | macOS 14.8.8, x86_64 |
-| `texter` | 2 passed | 2 passed | 2 passed |
-| `texter-common` | 6 passed | 6 passed | 6 passed |
-| `texter-freetype` | 9 passed, 1 skipped | – | – |
-| `texter-win32` | – | 10 passed | – |
-| `texter-coretext` | – | – | 10 passed |
+| `texter` | 3 passed | 3 passed | 3 passed |
+| `texter-common` | 10 passed | 10 passed | 10 passed |
+| `texter-freetype` | 17 passed | – | – |
+| `texter-win32` | – | 14 passed | – |
+| `texter-coretext` | – | – | 14 passed |
 | `examples/shapes` | run | run | run |
+| `bench.lua` | run | run | run |
 
 A package of another platform's backend skips rather than fails, which is what the skips are.
 
@@ -132,6 +135,17 @@ suggests, and every glyph of every font comes back as an error until that is rig
 nothing: every glyph of a run comes back nought, no index has a byte, and nothing about it is an
 error. Both of those were found by running this, which is the reason this section is a table.
 
+Emoji are the other half of that. A character outside the basic plane is two UTF-16 units on windows
+and macOS, and the parts of those two that answer a character a glyph -- `GetGlyphIndices`,
+`CTFontGetGlyphsForCharacters` with one unit -- answer with nothing at all for one: what knows that
+a pair is one character is the shaper, so what an emoji's glyph is asked of is the shaper, and on
+windows it is also the only thing there that shapes an emoji sequence into the one glyph it is drawn
+as. What Uniscribe then says of a cluster of a surrogate pair is not the unit it came from -- two
+emoji come back as two glyphs that both came from the first of them -- so a run that holds one is
+shaped a picture at a time and clustered where each was shaped. There are tests for all of it in
+each backend's own folder, and a font that draws emoji is one this library brings to none of them:
+a machine without one skips those tests rather than failing them.
+
 ## What is not in it
 
 | | |
@@ -139,7 +153,8 @@ error. Both of those were found by running this, which is the reason this sectio
 | Shaping *inside* a line of wonderland | texter shapes a line and wonderland's text layout draws a glyph a character, so a run of Arabic is drawn by texter's readers and as its letters apart by wonderland's layout. What is left is putting `texter.shape` between them |
 | Laying a paragraph out | wrapping, line breaking, justification, tabs, hanging punctuation: a line is what this shapes, and a paragraph is a thing to be written on top of it |
 | A font that is not where a caller looked | a chain of faces to fall back through is what `Line` and `hasGlyph` are for, and one is in wonderland's font manager; there is none in here |
-| Colour emoji, as a painter | the coverage of a glyph is what an atlas packs, so a font whose emoji are bitmaps (`CBDT`, `sbix`) works and a COLR v1 font -- which is what `Noto Color Emoji` is on most desktops -- is a paint graph a client draws itself |
+| Colour emoji a reader cannot paint | FreeType composes the layers of a COLR font and hands over the bitmaps of a CBDT or sbix one, so those come back in colour; a **COLR v1** font -- which is what `Noto Color Emoji` is on many desktops, and what this machine has -- is a paint graph that the client draws itself, so what comes back from it is nothing at all. What is left is a painter over the paint graph, which is `FT_Get_Color_Glyph_Paint` and a hundred lines of shapes |
+| Colour emoji in a renderer | the colour of a glyph is handed over; what packs it is a caller's, and a renderer whose atlas holds one byte a pixel draws that as nothing until it grows a second kind of page |
 | macOS fallback fonts | CoreText puts a font of its own in for a script a face has not got: those glyph ids are not of the face, so their ink is nothing. A caller that draws them opens a face that has them |
 | A line height that is exact on windows | GDI's font mapper rasterises in whole pixels and has no cell for every size: twenty-four pixels is twenty-four, twenty is nineteen, and asking again is what settles on the closest of them |
 | An installed font, by name | a face is a file: what fonts a machine has, and which one is called `Noto Sans`, is `fontconfig` and a font directory walk, which is wonderland's `wonderland.font.scan` |
@@ -170,3 +185,47 @@ lde test -C packages/texter-coretext  # ... if it is macOS
 A backend's tests run on the platform they are a backend for and nowhere else: they load the
 platform's own libraries, so on anything else they skip rather than fail, which is what makes `lde
 test -C packages/texter-win32` on a linux machine a green run with the windows tests skipped.
+
+## What it costs
+
+`packages/texter/bench.lua` is what shaping and packing a screen of text comes to, and what to run
+after touching anything on the way:
+
+```bash
+cd packages/texter && lde run bench.lua
+ROUNDS=5000 lde run bench.lua
+```
+
+It prints two numbers a call: the milliseconds, which are the fastest of several batches -- a machine
+doing other things only ever makes a batch slower -- and the kilobytes it allocated, which is what
+the collector then has to pay for. A line of text is shaped once a frame in a screen that rebuilds
+its view, and every glyph of it is packed once, so those are the calls worth keeping small.
+
+Three things about it are what the numbers are: reading a string, cutting it into runs and shaping
+one of them allocate nothing at all but the glyphs a caller is handed, because what a string is read
+into is a buffer this library keeps and grows rather than a table a character. A face is put at a
+size once and left there, which is worth three times the cost of loading a glyph: asking FreeType
+for a size it is already at throws away everything it has drawn and scaled for that size, so a
+screen packing a line a glyph at a time pays for the outlines again every glyph on it. And what a
+glyph comes to is written into room the reader keeps, rather than into a buffer made for it.
+
+What that comes to, on the three machines this has been run on, and what the same machine came to
+before the pass that found the three:
+
+| | linux | windows | macOS |
+| - | ----- | ------- | ----- |
+| shape a label, 16px | 0.0026 ms | 0.0110 ms | 0.0179 ms |
+| shape a sentence, 16px | 0.0157 ms | 0.0240 ms | 0.0327 ms |
+| shape a line of two directions | 0.0038 ms | 0.0130 ms | 0.0339 ms |
+| shape an empty line | 0.0002 ms | 0.0000 ms | 0.0057 ms |
+| ink one glyph | 0.0126 ms | 0.0840 ms | 0.0046 ms |
+| shape and pack forty lines | 28.0 ms | 219 ms | 13.0 ms |
+| the same, before | 100.3 ms | – | 44.1 ms |
+| what one of those calls allocates | 636 KB | 1636 KB | 1930 KB |
+| the same, before | 905 KB | 2028 KB | 2401 KB |
+
+What is left of the allocation is what a caller is handed: a table a glyph of the line. What GDI
+costs is GDI's: its outline call is a hundred microseconds a glyph where FreeType's is twelve, and
+nothing this library does with it is more than a copy of what comes back. A screen packs a glyph
+once -- the ink of a glyph at a size does not change -- so forty lines are two thousand glyphs
+packed here and some hundreds in a screen that keeps what it packed.

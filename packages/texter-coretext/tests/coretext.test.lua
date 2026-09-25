@@ -130,6 +130,51 @@ test.skipIf(not ok or fontPath == nil)("answers what wonderland asks a reader of
 	face:freeInk(face:ink(0x41, 18))
 end)
 
+--- The emoji fonts a machine of this platform is likely to have: what the tests of an emoji are
+--- about, and nothing this library brings. A machine without one skips rather than fails.
+local EMOJI = {
+	"/System/Library/Fonts/Apple Color Emoji.ttc",
+	"/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+	"/Library/Fonts/Arial Unicode.ttf",
+}
+
+---@return texter.coretext.Face? face
+local function anEmojiFace()
+	if not ok then
+		return nil
+	end
+
+	for _, path in ipairs(EMOJI) do
+		local file = io.open(path, "rb")
+
+		if file then
+			file:close()
+
+			local made, face = pcall(coretext.face, path, 0)
+
+			if made and face and face:hasGlyph(0x1F600) and face:hasGlyph(0x1F680) then
+				return face
+			end
+		end
+	end
+end
+
+local emojiFace = anEmojiFace()
+
+--- Where each character of a string starts, which is what a cluster of a glyph is checked against.
+---@param text string
+---@return table<number, boolean>
+local function starts(text)
+	local characters = require("texter-common").utf8.characters(text)
+	local at = {}
+
+	for index = 0, characters.count - 1 do
+		at[characters.offsets[index] - 1] = true
+	end
+
+	return at
+end
+
 test.skipIf(not ok or fontPath == nil)("counts a cluster in bytes of the line, not in characters", function()
 	local face = assert(coretext.face(assert(fontPath), 0))
 	local line = coretext.shape(face, "café!", 24)
@@ -193,6 +238,75 @@ test.skipIf(arabicFace == nil)("arranges a line of two directions, which is what
 		test.greater(#line.glyphs, 4, "and the line has glyphs to draw")
 		test.greater(line.width, 0, "and a width")
 	end)
+
+test.skipIf(emojiFace == nil)("draws an emoji, which is a character outside the basic plane", function()
+	local face = assert(emojiFace)
+
+	test.truthy(face:hasGlyph(0x1F600),
+		"it says it draws a grinning face, which is a character of two UTF-16 units")
+
+	local line = coretext.shape(face, "😀", 24)
+
+	test.equal(#line.glyphs, 1, "and one of it is one glyph")
+	test.greater(line.glyphs[1].glyph, 0, "which is a glyph of the font rather than the one for nothing")
+	test.equal(line.glyphs[1].cluster, 0, "and it came from the first byte of the line")
+	test.greater(line.width, 0, "and it takes room on it")
+end)
+
+test.skipIf(emojiFace == nil)("counts an emoji in bytes of the line, which is four of them", function()
+	local face = assert(emojiFace)
+	local line = coretext.shape(face, "😀😀", 24)
+	local at = starts("😀😀")
+
+	test.greater(#line.glyphs, 1, "two emoji are more than one glyph")
+
+	for index, glyph in ipairs(line.glyphs) do
+		test.truthy(at[glyph.cluster],
+			string.format("glyph %d came from a character of the line: byte %d", index, glyph.cluster))
+	end
+
+	local pen = 0.0
+
+	for _, glyph in ipairs(line.glyphs) do
+		pen = pen + glyph.advance
+	end
+
+	test.truthy(math.abs(line.width - pen) < 1.5, "and the line is as wide as its glyphs put together")
+end)
+
+test.skipIf(emojiFace == nil)("puts a caret between two emoji rather than inside one", function()
+	local face = assert(emojiFace)
+	local line = coretext.shape(face, "😀😀", 24)
+	local first = coretext.penOf(line, 0)
+	local second = coretext.penOf(line, 4)
+	local last = coretext.penOf(line, #line.text + 1)
+
+	-- A caret is placed at a byte, and what a person clicks are characters: a caret inside an emoji
+	-- -- which is what counting one in anything but bytes comes to -- is a caret halfway through a
+	-- character that has no halfway.
+	test.equal(first, 0, "the caret before the first emoji is at the start of the line")
+	test.greater(second, first, "and the one after it is where the second emoji starts")
+	test.greater(last, second, "and the end of the line is past both")
+	test.equal(coretext.byteAt(line, second), 4, "and a click there is the byte that emoji starts at")
+	test.equal(coretext.byteAt(line, first), 0, "and one at the start is the first byte")
+end)
+
+test.skipIf(emojiFace == nil)("shapes a sequence of emoji joined by a zero width joiner", function()
+	local face = assert(emojiFace)
+	local text = "👩‍🚀"
+	local line = coretext.shape(face, text, 24)
+	local at = starts(text)
+
+	test.greater(#line.glyphs, 0, "an astronaut is one emoji or the three characters it is written as")
+	test.equal(line.glyphs[1].cluster, 0, "and what is drawn first comes from the first character")
+
+	for index, glyph in ipairs(line.glyphs) do
+		test.truthy(at[glyph.cluster],
+			string.format("glyph %d came from a character of the sequence: byte %d", index, glyph.cluster))
+	end
+
+	test.equal(coretext.penOf(line, #text + 1), line.width, "and the end of it is the end of the line")
+end)
 
 test.skipIf(not coretext or fontPath == nil)("draws a glyph the right way up", function()
 	local face = assert(coretext.face(assert(fontPath), 0))
