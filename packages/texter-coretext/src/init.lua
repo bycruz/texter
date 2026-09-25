@@ -148,6 +148,10 @@ local coretext = {}
 ---@field descriptor CTFontDescriptorRef
 ---@field fonts table<number, CTFontRef> # One for each pixel height it has been asked for
 ---@field scale number # The size a font is made at for one pixel of line height
+
+-- The size a face is asked about a character at, where a caller does not say: whether a font draws
+-- a character is not a question about a size.
+local DEFAULT_HEIGHT = 16
 ---@field private canvas ffi.cdata*? # The bitmap context glyphs are drawn into, kept
 ---@field private canvasPixels ffi.cdata*? # What it draws into, kept
 ---@field private canvasWidth number # How wide that is, which is what a row of it is
@@ -321,11 +325,15 @@ end
 --- character outside the basic plane -- which every emoji is -- is two units that are one character,
 --- so what is handed over is the pair of them, and the glyph that comes back is in the first place
 --- the answer has room for.
+---
+--- Which glyph a codepoint is does not depend on the size it is drawn at, and a caller that does not
+--- say which size it means gets the one a face is asked about a character at: what a font draws is
+--- what it draws at any size.
 ---@param codepoint number
----@param pixelHeight number
+---@param pixelHeight number?
 ---@return number
 function Face:glyphFor(codepoint, pixelHeight)
-	local font = self:font(pixelHeight)
+	local font = self:font(pixelHeight or DEFAULT_HEIGHT)
 	local characters = ffi.new("UniChar[2]")
 	local count = 1
 
@@ -351,7 +359,7 @@ end
 ---@param codepoint number
 ---@return boolean
 function Face:hasGlyph(codepoint)
-	return self:glyphFor(codepoint, 16) ~= 0
+	return self:glyphFor(codepoint) ~= 0
 end
 
 ---@param codepoint number
