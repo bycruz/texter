@@ -132,15 +132,10 @@ end
 --- it wants something of its own platform.
 texter.backend = backend
 
---- What reads a font file, in the shape a UI library asks a reader of fonts for: `open(path, index)`,
---- which answers with a face whose `hasGlyph`, `metrics`, `advance`, `ink` and `freeInk` is what
---- packs a glyph into an atlas, and `shape(face, text, size)` and `ink(face, glyph, size)`, which are
---- how a screen draws a line of text: the glyphs a string is made of, and the ink of one of them. It
---- is the backend's own provider, so it is the platform that reads and draws the glyph, and a program
---- that hands it to its UI library draws text with what the machine already has -- see `wonderland`'s
---- `wonderland.font.Provider` and `FontManager.setProvider`.
----
---- It is nought on a machine whose text this cannot be, which is what `available()` says.
+--- This backend in the shape a UI library asks a reader of fonts for: `open`, which answers with a
+--- face, `shape(face, text, size)`, and `ink(face, glyph, size)`. See `wonderland`'s
+--- `wonderland.font.Provider`, which is what it is handed to, and `available()` for a machine whose
+--- text this cannot be.
 ---@type table?
 texter.provider = backend ~= nil and backend.provider or nil
 
