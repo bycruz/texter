@@ -66,11 +66,9 @@ function texter.arranges()
 	return bidi.available()
 end
 
---- The bytes of a font file, read the first time a line is shaped from that face: what HarfBuzz
---- reads a font's tables out of is the whole file, and the reader needs none of it -- what FreeType
---- draws a glyph from is the file it opened itself, read as it goes. So a face a screen only packs
---- glyphs from is read by FreeType and copied by nobody, and one a line is shaped in costs one copy
---- of a font file, which is a few hundred kilobytes for a text font and is held until the face goes.
+--- The bytes of a font file, read the first time a line is shaped from that face: what HarfBuzz reads
+--- a font's tables out of is the whole file, and FreeType needs none of it. So a face a screen only
+--- packs glyphs from is copied by nobody, and one a line is shaped in costs one copy of the file.
 ---@param face texter-freetype.Face
 ---@return string? content
 local function contentOf(face)
@@ -251,10 +249,8 @@ function texter.byteAt(line, x)
 	return #line.text + 1
 end
 
--- What a screen packs a glyph from and shapes a line with: the faces this module opens, in the shape
--- `wonderland` asks a reader of fonts for -- see `wonderland.font.Provider`. The faces are what an
--- atlas needs; `shape` and `ink` are here because a screen that draws text shapes its lines and
--- packs the glyphs a line came to, which are glyphs of a font rather than characters of a string.
+-- What a UI library asks a reader of fonts for -- see `wonderland.font.Provider`: the faces, and the
+-- shaping a screen that draws its lines as glyphs rather than characters needs.
 ---@type wonderland.font.Provider
 texter.provider = {
 	open = function(path, index)

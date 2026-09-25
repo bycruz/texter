@@ -73,13 +73,12 @@ for _, glyph in ipairs(line.glyphs) do
 end
 ```
 
-`texter.provider` is the same reader in the shape a UI library asks for one -- `open(path, index)`
-answering with a face whose `hasGlyph`, `metrics`, `advance`, `ink` and `freeInk` are what packs a
-glyph into an atlas, and `shape` and `ink`, which are what a screen that draws text as a *shaped*
-line needs: the glyphs a string comes to, and the ink of a glyph of a font rather than of a
-character of a string. It is what [wonderland](https://github.com/bycruz/wonderland) draws its
-text with: `wonderland.font.reader` is this package's provider, so a screen of text is read, shaped
-and drawn by the machine's own libraries and wonderland ships no reader at all.
+`texter.provider` is the same reader in the shape a UI library asks for one: `open(path, index)`,
+which answers with a face whose `hasGlyph`, `metrics`, `advance`, `ink` and `freeInk` are what packs
+a glyph into an atlas, and `shape` and `ink`, which are what drawing a line as glyphs rather than
+characters needs. It is what [wonderland](https://github.com/bycruz/wonderland) draws its text with:
+a screen of text is read, shaped and drawn by the machine's own libraries, and wonderland ships no
+reader at all.
 
 `examples/shapes` is the same thing as a program that prints what every sample came to, and it is
 the thing to run on a machine whose backend has never run there:

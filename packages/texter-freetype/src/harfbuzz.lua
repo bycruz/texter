@@ -246,16 +246,12 @@ function harfbuzz.shape(font, text, opts, into, at)
 	-- and how far it goes, so that the clusters it answers with are bytes of the *line*.
 	library.hb_buffer_add_utf8(buffer, text, #text, from, length)
 
-	-- What the run is set in is what the bidi algorithm worked out and nothing else: everything
-	-- else about it -- which script it is written in, and so which shaper reads it -- is guessed from
-	-- the text.
+	-- The direction is what the bidi algorithm worked out; the script is guessed from the text.
 	--
-	-- Which is not a detail. A shaper is chosen by script, and the one for arabic is the one that
-	-- joins letters to what is beside them: a line of arabic handed over as an unknown script comes
-	-- back as the letters it is spelled with, each drawn as it is drawn alone, and nothing about the
-	-- line says anything is wrong -- the same glyphs, the same advances, the same width. Guessing
-	-- only where the direction was not named is guessing for a line nobody named a direction of,
-	-- which is not a line this is ever handed.
+	-- HarfBuzz picks its shaper by script, and the one for arabic is the one that joins a letter to
+	-- what is beside it: a line of arabic handed over as an unknown script comes back as the letters
+	-- it is spelled with, drawn as they are drawn alone -- the same glyphs, the same advances, the
+	-- same width, and nothing about it saying anything is wrong.
 	if opts.direction ~= nil then
 		library.hb_buffer_set_direction(buffer, DIRECTION[opts.direction])
 	end

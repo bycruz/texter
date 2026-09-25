@@ -669,10 +669,8 @@ function coretext.byteAt(line, x)
 	return #line.text + 1
 end
 
--- What a screen packs a glyph from and shapes a line with: the faces this module opens, in the shape
--- `wonderland` asks a reader of fonts for -- see `wonderland.font.Provider`. The faces are what an
--- atlas needs; `shape` and `ink` are here because a screen that draws text shapes its lines and
--- packs the glyphs a line came to, which are glyphs of a font rather than characters of a string.
+-- What a UI library asks a reader of fonts for -- see `wonderland.font.Provider`: the faces, and the
+-- shaping a screen that draws its lines as glyphs rather than characters needs.
 ---@type wonderland.font.Provider
 coretext.provider = {
 	open = function(path, index)
