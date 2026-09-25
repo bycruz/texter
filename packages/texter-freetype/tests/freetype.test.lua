@@ -252,6 +252,23 @@ test.skipIf(not texter.available() or arabicPath == nil)("shapes Arabic in the o
 	end
 
 	test.equal(line.glyphs[#line.glyphs].cluster, 0, "and the last glyph drawn is the first letter")
+
+	-- That a word is more glyphs than letters is not what joining is: a font draws a word of arabic
+	-- as the letters they are written with, each of them a shape of its own -- what joining is, is
+	-- that the shape of a letter is decided by the letters beside it. So what says a line was shaped
+	-- as arabic is that two of the same letter in a word are two *different* shapes, and that
+	-- neither of them is that letter drawn on its own. A shaper that was never told which script it
+	-- was handed answers with the same glyph for all three and looks perfectly healthy doing it: the
+	-- same advances, the same width, the same number of glyphs in the same order.
+	local alone = texter.shape(face, "م", 32)
+	local pair = texter.shape(face, "مم", 32)
+
+	test.equal(#pair.glyphs, 2, "two of a letter are two glyphs")
+	test.truthy(pair.glyphs[1].glyph ~= pair.glyphs[2].glyph,
+		"and two different shapes: a letter joined on the left is not joined on the right")
+	test.truthy(pair.glyphs[1].glyph ~= alone.glyphs[1].glyph
+			and pair.glyphs[2].glyph ~= alone.glyphs[1].glyph,
+		"and neither of them is that letter on its own")
 end)
 
 test.skipIf(not texter.available() or arabicPath == nil or latinPath == nil)(

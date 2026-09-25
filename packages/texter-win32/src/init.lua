@@ -789,10 +789,20 @@ function win32.byteAt(line, x)
 	return #line.text + 1
 end
 
+-- What a screen packs a glyph from and shapes a line with: the faces this module opens, in the shape
+-- `wonderland` asks a reader of fonts for -- see `wonderland.font.Provider`. The faces are what an
+-- atlas needs; `shape` and `ink` are here because a screen that draws text shapes its lines and
+-- packs the glyphs a line came to, which are glyphs of a font rather than characters of a string.
 ---@type wonderland.font.Provider
 win32.provider = {
 	open = function(path, index)
 		return win32.face(path, index)
+	end,
+	shape = function(face, text, pixelHeight, opts)
+		return win32.shape(face, text, pixelHeight, opts)
+	end,
+	ink = function(face, glyph, pixelHeight)
+		return win32.ink(face, glyph, pixelHeight)
 	end,
 }
 

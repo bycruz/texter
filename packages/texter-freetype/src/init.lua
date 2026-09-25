@@ -66,6 +66,35 @@ function texter.arranges()
 	return bidi.available()
 end
 
+--- The bytes of a font file, read the first time a line is shaped from that face: what HarfBuzz
+--- reads a font's tables out of is the whole file, and the reader needs none of it -- what FreeType
+--- draws a glyph from is the file it opened itself, read as it goes. So a face a screen only packs
+--- glyphs from is read by FreeType and copied by nobody, and one a line is shaped in costs one copy
+--- of a font file, which is a few hundred kilobytes for a text font and is held until the face goes.
+---@param face texter-freetype.Face
+---@return string? content
+local function contentOf(face)
+	local content = contents[face]
+
+	if content ~= nil then
+		return content
+	end
+
+	local file = io.open(face.path, "rb")
+
+	if file == nil then
+		return nil
+	end
+
+	content = file:read("*all")
+
+	file:close()
+
+	contents[face] = content
+
+	return content
+end
+
 --- One font file, read: what the reader and the shaper both need of it.
 ---@param path string
 ---@param index number?
@@ -78,16 +107,11 @@ function texter.face(path, index)
 		return nil, err
 	end
 
-	local file = io.open(path, "rb")
-
-	if file == nil then
+	if contentOf(face) == nil then
 		return nil, "Could not read " .. path
 	end
 
-	contents[face] = file:read("*all")
 	shapedFonts[face] = {}
-
-	file:close()
 
 	return face
 end
@@ -104,7 +128,7 @@ end
 ---@param opts { direction: "ltr" | "rtl" | "auto"?, language: string? }?
 ---@return texter.Line
 function texter.shape(face, text, pixelHeight, opts)
-	assert(contents[face], "This face was not opened by this module: it has no bytes to shape from")
+	assert(contentOf(face) ~= nil, "This face has no font file to shape from: it was not opened here")
 
 	local characters = utf8.characters(text)
 	local runs, rtl = bidi.paragraph(text, characters, opts)
@@ -145,9 +169,9 @@ end
 ---@return ffi.cdata* font
 function texter.fontOf(face, pixelHeight)
 	local kept = shapedFonts[face]
-	local content = contents[face]
+	local content = contentOf(face)
 
-	assert(content ~= nil, "This face was not opened by this module: it has no bytes to shape from")
+	assert(content ~= nil, "This face has no font file to shape from: it was not opened here")
 
 	kept = kept or {}
 	shapedFonts[face] = kept
@@ -227,13 +251,20 @@ function texter.byteAt(line, x)
 	return #line.text + 1
 end
 
--- What a screen packs a glyph from: the faces this module opens, in the shape `wonderland` asks a
--- reader of fonts for -- see `wonderland.font.Provider`. Only the faces are here, because that is
--- what an atlas needs; a screen that shapes its lines asks this module for them.
+-- What a screen packs a glyph from and shapes a line with: the faces this module opens, in the shape
+-- `wonderland` asks a reader of fonts for -- see `wonderland.font.Provider`. The faces are what an
+-- atlas needs; `shape` and `ink` are here because a screen that draws text shapes its lines and
+-- packs the glyphs a line came to, which are glyphs of a font rather than characters of a string.
 ---@type wonderland.font.Provider
 texter.provider = {
 	open = function(path, index)
 		return freetype.open(path, index)
+	end,
+	shape = function(face, text, pixelHeight, opts)
+		return texter.shape(face, text, pixelHeight, opts)
+	end,
+	ink = function(face, glyph, pixelHeight)
+		return texter.ink(face, glyph, pixelHeight)
 	end,
 }
 
