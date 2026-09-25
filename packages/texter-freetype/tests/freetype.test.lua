@@ -36,12 +36,28 @@ local EMOJI = {
 	"C:/Windows/Fonts/seguiemj.ttf",
 }
 
---- The font this package keeps for the tests of a glyph a font draws in layers: a red square with a
---- blue dot on it, made with fontTools, tables and all. It is looked for where the test runner keeps
---- its own folder, so that it runs from the package and from the repository.
+--- The fonts this package keeps for the tests of a glyph a font draws rather than states: one
+--- whose layers are a COLR version 0 table -- a red square with a blue dot on it -- and one whose
+--- picture is a COLR version 1 *graph* -- a solid fill, a gradient, a composite, a transform and a
+--- reference to another picture, a glyph each. Both are made with fontTools, tables and all, and
+--- both are looked for where the test runner keeps its own folder, so that they run from the
+--- package and from the repository.
 local COLOUR = {
 	"tests/fonts/colour.ttf",
 	"packages/texter-freetype/tests/fonts/colour.ttf",
+}
+
+local GRAPH = {
+	"tests/fonts/graph.ttf",
+	"packages/texter-freetype/tests/fonts/graph.ttf",
+}
+
+--- An emoji font a desktop has, which is a graph of the newest kind on most of them now: what the
+--- painter is for, on the pictures a font actually ships.
+local COLRV1 = {
+	"/usr/share/fonts/google-noto-color-emoji-fonts/Noto-COLRv1.ttf",
+	"/System/Library/Fonts/Apple Color Emoji.ttc",
+	"C:/Windows/Fonts/seguiemj.ttf",
 }
 
 ---@param paths string[]
@@ -61,6 +77,8 @@ end
 local latinPath = present(LATIN)
 local arabicPath = present(ARABIC)
 local colourPath = present(COLOUR)
+local graphPath = present(GRAPH)
+local colrv1Path = present(COLRV1)
 
 --- A face of a font that draws emoji at all, which is what the emoji tests are about: a machine
 --- whose fonts have none of them skips rather than fails.
@@ -434,4 +452,161 @@ test.it("reads a bitmap a pixel at a time, whatever the pixels are", function()
 	test.equal(bgraOut[1], 20)
 	test.equal(bgraOut[4], 50, "and a second pixel is the one after it")
 	test.equal(bgraOut[7], 80)
+end)
+
+--- Where a glyph's ink is drawn, in the picture: which columns of a row have ink, and the colour of
+--- the first and the last of them.
+---@param ink texter.Ink
+---@param row number
+---@return number first
+---@return number last
+local function drawnIn(ink, row)
+	local pixels = assert(ink.pixels)
+	local first, last = nil, nil
+
+	for column = 0, ink.width - 1 do
+		if pixels[(row * ink.width + column) * 4 + 3] > 200 then
+			first = first or column
+			last = column
+		end
+	end
+
+	return first or -1, last or -1
+end
+
+--- What a pixel of it is, as the three colours and the alpha of it.
+---@param ink texter.Ink
+---@param row number
+---@param column number
+---@return number blue
+---@return number green
+---@return number red
+---@return number alpha
+local function pixelOf(ink, row, column)
+	local pixels = assert(ink.pixels)
+	local at = (row * ink.width + column) * 4
+
+	return pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]
+end
+
+test.skipIf(graphPath == nil)("paints a glyph a font draws as a graph of shapes and colours", function()
+	local face = assert(texter.face(assert(graphPath), 0))
+	local ink = face:ink(0x41, 32)
+
+	test.truthy(ink.colour, "a glyph a font draws as a graph comes back in colour")
+	test.greater(ink.width, 0, "and it is painted at all")
+
+	local row = math.floor(ink.height / 2)
+	local first, last = drawnIn(ink, row)
+	local blue, green, red, alpha = pixelOf(ink, row, math.floor((first + last) / 2))
+
+	test.greater(first, -1, "the shape of it is drawn")
+	test.equal(red, 255, "in the colour the graph fills it with")
+	test.equal(green, 0)
+	test.equal(blue, 0)
+	test.equal(alpha, 255, "and it is opaque where it is drawn")
+end)
+
+test.skipIf(graphPath == nil)("paints a gradient from one stop to the other", function()
+	local face = assert(texter.face(assert(graphPath), 0))
+	local ink = face:ink(0x42, 32)
+	local row = math.floor(ink.height / 2)
+	local first, last = drawnIn(ink, row)
+
+	test.greater(first, -1, "the shape is drawn")
+
+	local _, _, leftRed = pixelOf(ink, row, first)
+	local leftBlue = pixelOf(ink, row, first)
+	local _, _, rightRed = pixelOf(ink, row, last)
+	local rightBlue = pixelOf(ink, row, last)
+
+	test.truthy(leftRed > leftBlue + 100, "the start of it is the colour the gradient starts in")
+	test.truthy(rightBlue > rightRed + 100, "and the end of it is the colour it ends in")
+end)
+
+test.skipIf(graphPath == nil)("puts a picture over another where the graph says to", function()
+	local face = assert(texter.face(assert(graphPath), 0))
+
+	--- How many pixels of a picture are drawn in the second colour of the palette.
+	---@param ink texter.Ink
+	---@return number
+	local function bluePixels(ink)
+		local pixels = assert(ink.pixels)
+		local count = 0
+
+		for at = 0, ink.width * ink.height - 1 do
+			if pixels[at * 4] > 200 and pixels[at * 4 + 2] < 40 and pixels[at * 4 + 3] > 200 then
+				count = count + 1
+			end
+		end
+
+		return count
+	end
+
+	local square = face:ink(0x41, 32)
+
+	test.equal(bluePixels(square), 0, "a shape filled in one colour has none of the other")
+
+	local composited = face:ink(0x43, 32)
+
+	test.greater(bluePixels(composited), 0, "and a picture composited over it is drawn where it falls")
+	test.greater(bluePixels(composited), 20, "which is the dot the graph puts on it")
+end)
+
+test.skipIf(graphPath == nil)("draws a shape where the graph moves it to", function()
+	local face = assert(texter.face(assert(graphPath), 0))
+
+	-- What a glyph comes to is the face's own buffer, which the next glyph is written into: one is
+	-- read before the other is asked for, here and everywhere else in this file.
+	local inPlace = face:ink(0x41, 32)
+	local row = math.floor(inPlace.height / 2)
+	local inPlaceFirst = drawnIn(inPlace, row)
+	local inPlaceWidth = inPlace.width
+
+	local moved = face:ink(0x44, 32)
+	local movedFirst = drawnIn(moved, row)
+
+	-- The graph moves this one a fifth of the shape's own width to the left, which at this size is
+	-- about six pixels: what is drawn is where it was moved to rather than where the shape is.
+	test.greater(inPlaceFirst, -1, "the shape in place is drawn")
+	test.greater(movedFirst, -1, "and so is the same shape moved")
+	test.truthy(movedFirst < inPlaceFirst - 2,
+		string.format("which is somewhere else: %d against %d", movedFirst, inPlaceFirst))
+	test.equal(moved.width, inPlaceWidth, "in a picture of the same size")
+end)
+
+test.skipIf(graphPath == nil)("paints a picture the graph refers to rather than one of its own", function()
+	local face = assert(texter.face(assert(graphPath), 0))
+	local own = face:ink(0x41, 32)
+	local row = math.floor(own.height / 2)
+	local ownFirst, ownLast = drawnIn(own, row)
+	local ownWidth = own.width
+
+	local referred = face:ink(0x45, 32)
+	local referredFirst, referredLast = drawnIn(referred, row)
+
+	test.equal(referred.width, ownWidth, "a picture that is another picture is the same size as it")
+	test.equal(referredFirst, ownFirst, "and is drawn in the same place")
+	test.equal(referredLast, ownLast)
+end)
+
+test.skipIf(colrv1Path == nil)("paints an emoji out of the graph its font keeps", function()
+	local face = assert(texter.face(assert(colrv1Path), 0))
+	local ink = face:ink(0x2705, 24)
+
+	test.truthy(ink.colour, "an emoji is a coloured picture and not a shape")
+	test.greater(ink.width, 8, "and it is drawn at the size of the line it is in")
+	test.greater(ink.height, 8)
+	test.truthy(math.abs(ink.height - 24) <= 4, string.format("which is twenty-four pixels: %d", ink.height))
+
+	local drawn = 0
+	local pixels = assert(ink.pixels)
+
+	for at = 0, ink.width * ink.height - 1 do
+		if pixels[at * 4 + 3] > 200 then
+			drawn = drawn + 1
+		end
+	end
+
+	test.greater(drawn, ink.width * ink.height / 2, "and most of it is drawn rather than left empty")
 end)

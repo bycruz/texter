@@ -15,8 +15,9 @@ the desktop can display:
 - **Chinese, Japanese, Korean** are read out of fonts whose outlines are CFF, which a reader of
   TrueType outlines alone cannot open.
 - **Emoji** come as the font's own picture of them -- the layers of a COLR font, the bitmaps of a
-  CBDT or sbix one -- and not as a shape with nothing in it. What is handed back for one of those is
-  four bytes of colour a pixel rather than one of coverage: see `texter.Ink`.
+  CBDT or sbix one, and the *paint graph* of a COLR v1 one, which FreeType reads and will not paint
+  and `texter-freetype` does -- and not as a shape with nothing in it. What is handed back for one of
+  those is four bytes of colour a pixel rather than one of coverage: see `texter.Ink`.
 - **A line of two directions** -- a word of Arabic inside a line of English -- is cut into runs and
   put in the order a screen draws them.
 
@@ -125,7 +126,7 @@ It is not an em size, and it is not the size a font file says.
 | machine | Nobara 44 (KDE), x86_64 | Windows 10.0.26200, x86_64 | macOS 14.8.8, x86_64 |
 | `texter` | 3 passed | 3 passed | 3 passed |
 | `texter-common` | 10 passed | 10 passed | 10 passed |
-| `texter-freetype` | 17 passed | – | – |
+| `texter-freetype` | 23 passed | – | – |
 | `texter-win32` | – | 14 passed | – |
 | `texter-coretext` | – | – | 14 passed |
 | `examples/shapes` | run | run | run |
@@ -159,7 +160,7 @@ a machine without one skips those tests rather than failing them.
 | Shaping *inside* a line of wonderland | texter shapes a line and wonderland's text layout draws a glyph a character, so a run of Arabic is drawn by texter's readers and as its letters apart by wonderland's layout. What is left is putting `texter.shape` between them |
 | Laying a paragraph out | wrapping, line breaking, justification, tabs, hanging punctuation: a line is what this shapes, and a paragraph is a thing to be written on top of it |
 | A font that is not where a caller looked | a chain of faces to fall back through is what `Line` and `hasGlyph` are for, and one is in wonderland's font manager; there is none in here |
-| Colour emoji a reader cannot paint | FreeType composes the layers of a COLR font and hands over the bitmaps of a CBDT or sbix one, so those come back in colour; a **COLR v1** font -- which is what `Noto Color Emoji` is on many desktops, and what this machine has -- is a paint graph that the client draws itself, so what comes back from it is nothing at all. What is left is a painter over the paint graph, which is `FT_Get_Color_Glyph_Paint` and a hundred lines of shapes |
+| Colour emoji, everywhere | A glyph a font states as a graph (COLR v1, which is what most desktops install now) is painted by `texter-freetype.paint`, and a CBDT or sbix font's bitmaps and a COLR v0 font's layers come back from FreeType itself. What none of them is, on windows or macOS, is painted through the platform's own reader: GDI and CoreText hand a colour glyph over as coverage, so an emoji is its shape there and its colours here |
 | Colour emoji in a renderer | the colour of a glyph is handed over; what packs it is a caller's, and a renderer whose atlas holds one byte a pixel draws that as nothing until it grows a second kind of page |
 | macOS fallback fonts | CoreText puts a font of its own in for a script a face has not got: those glyph ids are not of the face, so their ink is nothing. A caller that draws them opens a face that has them |
 | A line height that is exact on windows | GDI's font mapper rasterises in whole pixels and has no cell for every size: twenty-four pixels is twenty-four, twenty is nineteen, and asking again is what settles on the closest of them |

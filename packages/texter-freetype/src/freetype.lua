@@ -27,6 +27,31 @@ ffi.cdef [[
 		void (*finalizer)(void *data);
 	} FT_Generic;
 
+	// An outline, which is what a glyph is before it is drawn: its points in 26.6, the tags that say
+	// what each of them is, and where each contour ends. What the layers of a colour font are filled
+	// from, and what a transform is applied to before they are drawn.
+	typedef struct {
+		unsigned short n_contours, n_points;
+		FT_Vector *points;
+		unsigned char *tags;
+		unsigned short *contours;
+		int flags;
+	} FT_Outline;
+
+	// The size a face is at: how one unit of the font comes to pixels, in 16.16. A colour font states
+	// its gradients in font units, so this is what they are read in.
+	typedef struct {
+		unsigned short x_ppem, y_ppem;
+		long x_scale, y_scale;
+		long ascender, descender, height, max_advance;
+	} FT_Size_Metrics;
+
+	typedef struct FT_SizeRec_ {
+		FT_Face face;
+		FT_Generic generic;
+		FT_Size_Metrics metrics;
+	} FT_SizeRec;
+
 	typedef struct { long xMin, yMin, xMax, yMax; } FT_BBox;
 
 	typedef struct {
@@ -63,7 +88,7 @@ ffi.cdef [[
 		short underline_position;
 		short underline_thickness;
 		FT_GlyphSlot glyph;
-		void *size;
+		FT_SizeRec *size;
 	} FT_FaceRec;
 
 	typedef struct FT_GlyphSlotRec_ {
@@ -80,6 +105,7 @@ ffi.cdef [[
 		FT_Bitmap bitmap;
 		int bitmap_left;
 		int bitmap_top;
+		FT_Outline outline;
 	} FT_GlyphSlotRec;
 
 	int FT_Init_FreeType(FT_Library *library);
@@ -92,6 +118,8 @@ ffi.cdef [[
 	int FT_Load_Glyph(FT_Face face, unsigned int index, int32_t flags);
 	int FT_Load_Sfnt_Table(FT_Face face, unsigned long tag, long offset, unsigned char *buffer, unsigned long *length);
 	int FT_Render_Glyph(FT_GlyphSlot slot, unsigned int mode);
+	int FT_Outline_Transform(const FT_Outline *outline, const void *matrix);
+	int FT_Outline_Translate(const FT_Outline *outline, long x, long y);
 ]]
 
 --- A face as FreeType holds it, which the language server cannot see.
@@ -108,6 +136,7 @@ ffi.cdef [[
 ---@field bitmap texter.freetype.ffi.Bitmap
 ---@field bitmap_left number
 ---@field bitmap_top number
+---@field outline ffi.cdata*
 
 ---@class texter.freetype.ffi.Vector: ffi.cdata*
 ---@field x number
@@ -129,6 +158,11 @@ local NAMES = { "freetype", "libfreetype.so.6", "libfreetype.6.dylib", "freetype
 
 -- FT_ENC_TAG('u','n','i','c'): the character map a codepoint is looked up in.
 local UNICODE = 0x756E6963
+
+-- What paints a glyph a font draws as a graph of its own, which is what a colour font of the
+-- newest kind is: required here rather than above, because what it paints into is a face and an
+-- outline, and those are declared in this module.
+local paint = require("texter-freetype.paint")
 
 -- FT_LOAD_DEFAULT and FT_LOAD_RENDER: hinted, and drawn, in the one call that asks for a glyph.
 local LOAD_DEFAULT = 0
@@ -426,8 +460,21 @@ end
 function Face:inkOf(glyph, pixelHeight)
 	self:size(pixelHeight)
 
-	-- One call for the whole of it: the glyph is asked for the colours it has, which a font that has
-	-- none ignores, and drawn, which a glyph whose picture is a table of its own does not need.
+	-- A glyph a font draws as a *graph* of its own -- the layers, gradients, shapes and composites
+	-- of a COLR version 1 table, which is what a desktop's emoji font is -- is the graph: what its
+	-- outline is is a shape the font keeps for a reader that cannot paint, and what a reader that
+	-- can hands back is the picture. Nothing FreeType draws by itself is the picture, so what paints
+	-- one is `texter-freetype.paint`.
+	if paint.has(library, self.handle, glyph) then
+		local painted = self:paintOf(glyph, pixelHeight)
+
+		if painted.width > 0 then
+			return painted
+		end
+	end
+
+	-- One call for the whole of the rest: the glyph is asked for the colours it has, which a font
+	-- that has none ignores, and drawn, which a glyph with a picture of its own does not need.
 	if library.FT_Load_Glyph(self.handle, glyph, LOAD_DEFAULT + LOAD_RENDER + LOAD_COLOR) ~= 0 then
 		return NOTHING
 	end
@@ -460,6 +507,41 @@ function Face:inkOf(glyph, pixelHeight)
 		top = -tonumber(slot.bitmap_top),
 		pixels = self.stack,
 		colour = colour or nil,
+	}
+end
+
+--- The picture of a glyph a font draws as a graph of its own, painted into the buffer this face
+--- keeps: what a colour glyph of the newest kind is, and what FreeType hands over unpainted.
+---@param glyph number
+---@param pixelHeight number
+---@return texter.Ink
+function Face:paintOf(glyph, pixelHeight)
+	local left, top, width, height = paint.boxOf(library, self.handle, glyph, pixelHeight)
+
+	if width <= 0 or height <= 0 then
+		return NOTHING
+	end
+
+	local room = width * height * 4
+
+	if room > self.room then
+		self.room = room
+		self.stack = ffi.new("unsigned char[?]", self.room)
+	end
+
+	if not paint.into(library, self.handle, glyph, self.stack, left, top, width, height) then
+		return NOTHING
+	end
+
+	-- Where the ink sits is where the graph was painted from rather than where the empty outline of
+	-- the glyph is: what a caller is handed is the picture, and the picture knows its own corner.
+	return {
+		width = width,
+		height = height,
+		left = left,
+		top = -top,
+		pixels = self.stack,
+		colour = true,
 	}
 end
 

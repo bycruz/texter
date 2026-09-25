@@ -6,7 +6,12 @@
 --
 -- Three libraries, all of them the machine's own: FreeType reads a font file and draws a glyph,
 -- HarfBuzz turns a string into the glyphs it is drawn from, and fribidi arranges a line that is set
--- in more than one direction. Nothing here is built or shipped -- what a desktop has is what this
+-- in more than one direction.
+--
+-- What FreeType reads and will not draw is a glyph a font states as a *graph* -- a COLR version 1
+-- table, which is what a desktop's emoji font is now -- and what paints one is `paint.lua` beside
+-- this: the layers, gradients, shapes, transforms and composites of the graph, into the same four
+-- bytes a pixel that a COLR version 0 or a CBDT font comes back as. Nothing here is built or shipped -- what a desktop has is what this
 -- uses, and what a machine without them has is `why()`.
 --
 -- What comes out of `shape` is what a renderer draws: the glyphs of a line, in the order they are
