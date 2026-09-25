@@ -72,6 +72,12 @@ for _, glyph in ipairs(line.glyphs) do
 end
 ```
 
+`texter.provider` is the same reader in the shape a UI library asks for one -- `open(path, index)`
+answering with a face whose `hasGlyph`, `metrics`, `advance`, `ink` and `freeInk` are what packs a
+glyph into an atlas -- which is what [wonderland](https://github.com/bycruz/wonderland) draws its
+text with: `wonderland.font.reader` is this package's provider, so a screen of text is read and
+drawn by the machine's own libraries and wonderland ships no reader at all.
+
 `examples/shapes` is the same thing as a program that prints what every sample came to, and it is
 the thing to run on a machine whose backend has never run there:
 

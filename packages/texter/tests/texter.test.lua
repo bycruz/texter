@@ -93,3 +93,12 @@ test.skipIf(emojiFace == nil)("shapes an emoji through the one API, whatever bac
 	test.greater(texter.penOf(line, 4), 0, "and there is room between them for a caret")
 	test.equal(texter.byteAt(line, texter.penOf(line, 4)), 4, "which is placed where the byte is")
 end)
+
+test.it("hands out the reader a UI library asks for, where this machine can read a font at all", function()
+	if texter.available() then
+		test.truthy(texter.provider ~= nil, "a machine with text has something that reads a font")
+		test.truthy(type(texter.provider.open) == "function", "which is opened by a path")
+	else
+		test.equal(texter.provider, nil, "and a machine without it has nothing to hand over")
+	end
+end)
