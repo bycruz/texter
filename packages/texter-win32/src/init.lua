@@ -164,6 +164,7 @@ local win32 = {}
 ---@field height number
 ---@field stack ffi.cdata* # Where a glyph's ink is copied, kept
 ---@field room number # How many pixels that stack holds, grown as glyphs need
+---@field cache ffi.cdata* # The SCRIPT_CACHE of the font this face has selected, given back when it changes
 ---@field distant table<number, number> # What a character outside the basic plane came to, kept
 local Face = {}
 
@@ -280,32 +281,12 @@ local rawRoom = 0
 ---@type ffi.cdata*
 local raw = nil
 
--- What Uniscribe answers the counts of, made once, and the cache it keeps a shaped font in. The
--- cache is not the caller's to share: what it holds is one font in one device context, and a cache
--- made for one font that is handed a run of another answers with a shape that is not the font's --
--- which is why what it is made for is remembered, and why another font gives it back first.
+-- What Uniscribe answers the counts of, made once. What it keeps of a shaped font is the cache
+-- each face holds: what a cache holds is one font *at one size* in one device context, and a
+-- cache kept across a font change answers a line of the new size with the metrics of the old
+-- one -- see `Face:forget`, which is where it is given back.
 local used = ffi.new("int[1]")
 local shaped = ffi.new("int[1]")
-local cached = ffi.new("SCRIPT_CACHE[1]")
-local cachedFor = nil
-
---- The cache of one device context, given back when the context being shaped in is not the one it
---- was made for.
----@param context HDC
----@return SCRIPT_CACHE*
-local function cacheFor(context)
-	if cachedFor ~= context then
-		if cachedFor ~= nil then
-			usp.ScriptFreeCache(cached)
-
-			cached[0] = nil
-		end
-
-		cachedFor = context
-	end
-
-	return cached
-end
 
 --- Grows what shaping is handed to hold a line of this many units and a run of this many glyphs.
 ---@param units number
@@ -362,6 +343,7 @@ function win32.face(path, index)
 		height = 0,
 		stack = ffi.new("unsigned char[?]", 1 << 16),
 		room = 1 << 16,
+		cache = ffi.new("SCRIPT_CACHE[1]"),
 		distant = {},
 	}, { __index = Face })
 
@@ -417,6 +399,8 @@ function Face:size(pixelHeight)
 		return
 	end
 
+	self:forget()
+
 	local wanted = math.max(1, math.floor(pixelHeight + 0.5))
 	local made = self:make(wanted)
 	local metrics = ffi.new("TEXTMETRICW")
@@ -468,6 +452,29 @@ function Face:size(pixelHeight)
 	end
 
 	self.font, self.height = made, pixelHeight
+end
+
+--- What Uniscribe has kept of the font this face had selected, given back.
+---
+--- A cache is Uniscribe's, and what it holds is one font at one size in one device context: a cache
+--- filled at one size and handed a line of another answers with the *first* size's advances rather
+--- than the new size's. A face is one file at every size it is read at -- what keeps a screen from
+--- reading a font again for every size on it -- so a screen with a heading and a paragraph on it was
+--- drawing every line after the first at the spacing of the size the first line was shaped at: the
+--- letters of everything else ran together or stood apart, whichever way the size went, while the
+--- ink of each of them was the size it was asked for.
+---
+--- What it costs is the cache of the size being left behind, which is what Uniscribe documents for a
+--- font change, and what a screen pays once for each time it moves from one size to another.
+---@param self texter.win32.Face
+function Face:forget()
+	local cache = self.cache
+
+	if cache ~= nil and cache[0] ~= nil then
+		usp.ScriptFreeCache(cache)
+
+		cache[0] = nil
+	end
 end
 
 ---@param codepoint number
@@ -678,7 +685,7 @@ function win32.shape(face, text, pixelHeight, _opts)
 		for which = 1, ranges do
 			local at, upto = from[which], to[which]
 			local length = upto - at
-			local cache = cacheFor(face.context)
+			local cache = assert(face.cache)
 			local result = usp.ScriptShape(face.context, cache, characters + at, length, length * 3 + 16, analysis,
 				out, clusters, attributes, shaped)
 

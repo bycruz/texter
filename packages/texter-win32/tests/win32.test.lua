@@ -111,6 +111,33 @@ test.skipIf(not ok or fontPath == nil)("shapes a line into the glyphs it is draw
 	test.truthy(math.abs(line.width - pen) < 1.5, "and the line is as wide as its glyphs put together")
 end)
 
+test.skipIf(not ok or fontPath == nil)("shapes a line at the size it is asked for, after another size", function()
+	-- One face is one file at every size it is read at, which is what a screen of a heading and a
+	-- paragraph is drawn from: what Uniscribe keeps of a font is kept per font, and a cache kept
+	-- across a font change answers the second size with the advances of the first -- which draws
+	-- every line after the first at the spacing of the one before it.
+	local shared = assert(win32.face(assert(fontPath), 0))
+	local alone = assert(win32.face(assert(fontPath), 0))
+
+	win32.shape(shared, "Handgloves", 16)
+
+	local after = win32.shape(shared, "Handgloves", 48)
+	local expected = win32.shape(alone, "Handgloves", 48)
+
+	test.equal(#after.glyphs, #expected.glyphs, "a line is the same glyphs whatever was shaped before it")
+	test.equal(after.width, expected.width,
+		string.format("and is %.0f wide at forty-eight, as it is in a face of its own", expected.width))
+
+	for index, glyph in ipairs(after.glyphs) do
+		test.equal(glyph.advance, expected.glyphs[index].advance,
+			string.format("glyph %d moves the pen as far as it does in a face of its own", index))
+	end
+
+	local small = win32.shape(shared, "Handgloves", 16)
+
+	test.greater(after.width, small.width * 2, "and a size three times another is more than twice as wide")
+end)
+
 test.skipIf(not ok or fontPath == nil)("puts a caret where a byte of the line is", function()
 	local face = assert(win32.face(assert(fontPath), 0))
 	local line = win32.shape(face, "Hello", 24)
