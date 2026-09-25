@@ -3,7 +3,7 @@
 	"name": "texter",
 	"description": "Text shaping and glyphs from what the system already has",
 	"authors": ["David Cruz <david@bycruz.dev>"],
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"dependencies": {
 		"texter-freetype": { "path": "../texter-freetype", "optional": true },
 		"texter-win32": { "path": "../texter-win32", "optional": true },
