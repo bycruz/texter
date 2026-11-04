@@ -167,6 +167,10 @@ local paint = require("texter-freetype.paint")
 -- FT_LOAD_DEFAULT and FT_LOAD_RENDER: hinted, and drawn, in the one call that asks for a glyph.
 local LOAD_DEFAULT = 0
 local LOAD_RENDER = 4
+-- Light hinting keeps vertical stems on the grid without squeezing horizontal bearings. At small
+-- sizes full hinting changes widths and side bearings that HarfBuzz did not use, which is what
+-- makes letters inside a short word look unevenly spaced.
+local LOAD_TARGET_LIGHT = 1 << 16
 
 -- FT_LOAD_COLOR: a glyph whose picture is a table of its own rather than an outline -- which is what
 -- every emoji is: COLR, CBDT, sbix -- is asked for the colours it has, and what a font of those
@@ -381,7 +385,7 @@ end
 function Face:advance(codepoint, pixelHeight)
 	local glyph = self:glyphFor(codepoint, pixelHeight)
 
-	library.FT_Load_Glyph(self.handle, glyph, LOAD_DEFAULT)
+	library.FT_Load_Glyph(self.handle, glyph, LOAD_DEFAULT + LOAD_TARGET_LIGHT)
 
 	return tonumber(self.handle.glyph.advance.x) / 64
 end
@@ -475,7 +479,8 @@ function Face:inkOf(glyph, pixelHeight)
 
 	-- One call for the whole of the rest: the glyph is asked for the colours it has, which a font
 	-- that has none ignores, and drawn, which a glyph with a picture of its own does not need.
-	if library.FT_Load_Glyph(self.handle, glyph, LOAD_DEFAULT + LOAD_RENDER + LOAD_COLOR) ~= 0 then
+	if library.FT_Load_Glyph(self.handle, glyph,
+		LOAD_DEFAULT + LOAD_RENDER + LOAD_COLOR + LOAD_TARGET_LIGHT) ~= 0 then
 		return NOTHING
 	end
 
