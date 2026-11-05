@@ -83,6 +83,19 @@ test.skipIf(not texter.available() or fontPath == nil)("shapes and measures thro
 	test.equal(texter.penOf(line, 0), 0, "the caret before it is at the start of the line")
 end)
 
+test.skipIf(not texter.available() or fontPath == nil)("reads and shapes a face from its bytes", function()
+	local file = assert(io.open(assert(fontPath), "rb"))
+	local content = file:read("*a")
+
+	file:close()
+
+	local face = assert(texter.faceBytes(content, 0))
+	local line = texter.shape(face, "hello", 24)
+
+	test.equal(#line.glyphs, 5, "five characters are five glyphs from the same bytes")
+	test.greater(line.width, 0, "and the line has a width")
+end)
+
 test.skipIf(emojiFace == nil)("shapes an emoji through the one API, whatever backend it went to", function()
 	local face = assert(emojiFace)
 	local line = texter.shape(face, "😀😀", 24)
@@ -98,6 +111,7 @@ test.it("hands out the reader a UI library asks for, where this machine can read
 	if texter.available() then
 		test.truthy(texter.provider ~= nil, "a machine with text has something that reads a font")
 		test.truthy(type(texter.provider.open) == "function", "which is opened by a path")
+		test.truthy(type(texter.provider.openBytes) == "function", "or by the bytes of a font")
 	else
 		test.equal(texter.provider, nil, "and a machine without it has nothing to hand over")
 	end

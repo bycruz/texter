@@ -20,6 +20,7 @@ ffi.cdef [[
 	typedef const void *CFAllocatorRef;
 	typedef struct __CFString *CFStringRef;
 	typedef struct __CFURL *CFURLRef;
+	typedef struct __CFData *CFDataRef;
 	typedef struct __CFArray *CFArrayRef;
 	typedef struct __CFDictionary *CFDictionaryRef;
 	typedef struct __CFAttributedString *CFAttributedStringRef;
@@ -61,7 +62,9 @@ ffi.cdef [[
 	void CFStringGetCharacters(CFStringRef text, CFRange range, UniChar *into);
 	CFURLRef CFURLCreateFromFileSystemRepresentation(CFAllocatorRef allocator, const unsigned char *path,
 		CFIndex length, Boolean isDirectory);
+	CFDataRef CFDataCreate(CFAllocatorRef allocator, const unsigned char *bytes, CFIndex length);
 	CFArrayRef CTFontManagerCreateFontDescriptorsFromURL(CFURLRef url);
+	CFArrayRef CTFontManagerCreateFontDescriptorsFromData(CFDataRef data);
 	CFIndex CFArrayGetCount(CFArrayRef array);
 	const void *CFArrayGetValueAtIndex(CFArrayRef array, CFIndex index);
 	void CFRelease(CFTypeRef object);
@@ -207,6 +210,72 @@ local function grow(count)
 	indexBuffer = ffi.new("CFIndex[?]", room)
 end
 
+--- A face from the descriptors CoreText made for a font, whether it was given a file or its bytes.
+---@param descriptors CFArrayRef
+---@param label string
+---@param index number?
+---@return texter.coretext.Face? face
+---@return string? err
+local function fromDescriptors(descriptors, label, index)
+	-- What comes back from a count is a long, which ffi hands over as a cdata of its own: what a
+	-- count is here is a number, and arithmetic on it is what says that it is one.
+	local count = tonumber(core.CFArrayGetCount(descriptors))
+
+	if count == 0 then
+		core.CFRelease(descriptors)
+
+		return nil, label .. " holds no font"
+	end
+
+	local at = math.min((index or 0) + 1, count)
+
+	-- What an array holds is a bare pointer: what it is a pointer *to* is what this knows, and ffi
+	-- does not guess.
+	local descriptor = ffi.cast("CTFontDescriptorRef", core.CFArrayGetValueAtIndex(descriptors, at - 1))
+
+	-- The descriptor is what the fonts of every size are made from, so it is kept: what the array
+	-- holds goes with the array.
+	core.CFRetain(ffi.cast("CFTypeRef", descriptor))
+	core.CFRelease(descriptors)
+
+	---@cast descriptor CTFontDescriptorRef
+	local face = setmetatable({
+		path = label,
+		index = index or 0,
+		descriptor = descriptor,
+		fonts = {},
+		scale = 0,
+		canvas = nil,
+		canvasPixels = nil,
+		canvasWidth = 0,
+		canvasHeight = 0,
+		room = 0,
+		stack = nil,
+		space = nil,
+		colour = nil,
+	}, { __index = Face })
+
+	-- A pixel height is how tall a *line* of text is here, and CoreText is asked for a size in
+	-- points: the ratio between them is the font's own, measured once at a size of a hundred.
+	local nominal = coreText.CTFontCreateWithFontDescriptor(descriptor, 100, nil)
+
+	if nominal == nil then
+		return nil, label .. " made no font"
+	end
+
+	local line = coreText.CTFontGetAscent(nominal) + coreText.CTFontGetDescent(nominal)
+
+	core.CFRelease(nominal)
+
+	if line <= 0 then
+		return nil, label .. " states no line height"
+	end
+
+	face.scale = 100 / line
+
+	return face
+end
+
 --- Reads a font file: macOS registers a font by URL and hands back what it is, which is a font made
 --- at any size afterwards.
 ---@param path string
@@ -228,63 +297,31 @@ function coretext.face(path, index)
 		return nil, path .. " is not a font macOS can read"
 	end
 
-	-- What comes back from a count is a long, which ffi hands over as a cdata of its own: what a
-	-- count is here is a number, and arithmetic on it is what says that it is one.
-	local count = tonumber(core.CFArrayGetCount(descriptors))
+	return fromDescriptors(descriptors, path, index)
+end
 
-	if count == 0 then
-		core.CFRelease(descriptors)
+--- Reads a font from its bytes: CoreText makes the descriptors a file would have, without a file
+--- ever existing.
+---@param content string
+---@param index number?
+---@return texter.coretext.Face? face
+---@return string? err
+function coretext.faceBytes(content, index)
+	local data = core.CFDataCreate(nil, content, #content)
 
-		return nil, path .. " holds no font"
+	if data == nil then
+		return nil, "macOS would not take the embedded font's bytes"
 	end
 
-	local at = math.min((index or 0) + 1, count)
+	local descriptors = coreText.CTFontManagerCreateFontDescriptorsFromData(data)
 
-	-- What an array holds is a bare pointer: what it is a pointer *to* is what this knows, and ffi
-	-- does not guess.
-	local descriptor = ffi.cast("CTFontDescriptorRef", core.CFArrayGetValueAtIndex(descriptors, at - 1))
+	core.CFRelease(data)
 
-	-- The descriptor is what the fonts of every size are made from, so it is kept: what the array
-	-- holds goes with the array.
-	core.CFRetain(ffi.cast("CFTypeRef", descriptor))
-	core.CFRelease(descriptors)
-
-	---@cast descriptor CTFontDescriptorRef
-	local face = setmetatable({
-		path = path,
-		index = index or 0,
-		descriptor = descriptor,
-		fonts = {},
-		scale = 0,
-		canvas = nil,
-		canvasPixels = nil,
-		canvasWidth = 0,
-		canvasHeight = 0,
-		room = 0,
-		stack = nil,
-		space = nil,
-		colour = nil,
-	}, { __index = Face })
-
-	-- A pixel height is how tall a *line* of text is here, and CoreText is asked for a size in
-	-- points: the ratio between them is the font's own, measured once at a size of a hundred.
-	local nominal = coreText.CTFontCreateWithFontDescriptor(descriptor, 100, nil)
-
-	if nominal == nil then
-		return nil, path .. " made no font"
+	if descriptors == nil then
+		return nil, "the embedded font is not a font macOS can read"
 	end
 
-	local line = coreText.CTFontGetAscent(nominal) + coreText.CTFontGetDescent(nominal)
-
-	core.CFRelease(nominal)
-
-	if line <= 0 then
-		return nil, path .. " states no line height"
-	end
-
-	face.scale = 100 / line
-
-	return face
+	return fromDescriptors(descriptors, "<memory>", index)
 end
 
 --- The font at a pixel height, made once for each: what a size is here is a size of a line.
@@ -675,6 +712,9 @@ end
 coretext.provider = {
 	open = function(path, index)
 		return coretext.face(path, index)
+	end,
+	openBytes = function(content, index)
+		return coretext.faceBytes(content, index)
 	end,
 	shape = function(face, text, pixelHeight, opts)
 		return coretext.shape(face, text, pixelHeight, opts)

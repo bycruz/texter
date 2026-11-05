@@ -73,10 +73,10 @@ for _, glyph in ipairs(line.glyphs) do
 end
 ```
 
-`texter.provider` is the same reader in the shape a UI library asks for one: `open(path, index)`,
-which answers with a face whose `hasGlyph`, `metrics`, `advance`, `ink` and `freeInk` are what packs
-a glyph into an atlas, and `shape` and `ink`, which are what drawing a line as glyphs rather than
-characters needs. It is what [wonderland](https://github.com/bycruz/wonderland) draws its text with:
+`texter.provider` is the same reader in the shape a UI library asks for one: `open(path, index)` or
+`openBytes(content, index)`, which answer with a face whose `hasGlyph`, `metrics`, `advance`, `ink`
+and `freeInk` are what packs a glyph into an atlas, and `shape` and `ink`, which are what drawing a
+line as glyphs rather than characters needs. It is what [wonderland](https://github.com/bycruz/wonderland) draws its text with:
 a screen of text is read, shaped and drawn by the machine's own libraries, and wonderland ships no
 reader at all.
 
@@ -94,6 +94,7 @@ lde run -C examples/shapes
 | `texter.available()` | whether this machine has the libraries text is drawn with |
 | `texter.why()` | what is missing, where it is missing |
 | `texter.face(path, index?)` | a font file read: a whole file, one font of a collection, at any size afterwards |
+| `texter.faceBytes(content, index?)` | the same face read from the font's bytes, with no file to open |
 | `texter.shape(face, text, pixelHeight, opts?)` | a line: the glyphs it is drawn from, where each goes, and which byte of the string it came from |
 | `texter.ink(face, glyph, pixelHeight)` | one glyph of a font: its size, where it sits, and its pixels -- coverage, or colour for a glyph a font draws as a picture |
 | `texter.metrics(face, pixelHeight)` | how tall a line of it is: above the baseline, below it, and the gap between lines |

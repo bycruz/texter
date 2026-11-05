@@ -305,6 +305,21 @@ test.skipIf(not texter.available() or latinPath == nil)("answers what wonderland
 	face:freeInk(face:ink(0x41, 18))
 end)
 
+test.skipIf(not texter.available() or latinPath == nil)("reads the same face from its bytes", function()
+	local file = assert(io.open(assert(latinPath), "rb"))
+	local content = file:read("*a")
+
+	file:close()
+
+	local face = assert(texter.faceBytes(content, 0))
+
+	test.truthy(face:hasGlyph(0x41), "a face from bytes draws the letters a file does")
+	test.greater(face:advance(0x41, 18), 0, "and moves the pen for one")
+	test.greater(texter.shape(face, "A", 18).width, 0, "and shapes a line from the same bytes")
+	test.greater(assert(texter.provider.openBytes(content, 0)):ink(0x41, 18).width, 0,
+		"and the provider wonderland asks is handed them too")
+end)
+
 test.skipIf(not texter.available() or latinPath == nil)("draws a glyph the right way up", function()
 	local face = assert(texter.face(assert(latinPath), 0))
 

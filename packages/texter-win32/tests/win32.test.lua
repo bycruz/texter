@@ -147,6 +147,21 @@ test.skipIf(not ok or fontPath == nil)("puts a caret where a byte of the line is
 	test.equal(win32.byteAt(line, 0), 0, "a point at the start is the first byte")
 end)
 
+test.skipIf(not ok or fontPath == nil)("reads the same face from its bytes", function()
+	local file = assert(io.open(assert(fontPath), "rb"))
+	local content = file:read("*a")
+
+	file:close()
+
+	local face = assert(win32.faceBytes(content, 0))
+
+	test.truthy(face:hasGlyph(0x41), "a face from bytes draws the letters a file does")
+	test.greater(face:advance(0x41, 18), 0, "and moves the pen for one")
+	test.greater(win32.shape(face, "A", 18).width, 0, "and shapes a line from the same bytes")
+	test.greater(assert(win32.provider.openBytes(content, 0)):ink(0x41, 18).width, 0,
+		"and the provider wonderland asks is handed them too")
+end)
+
 test.skipIf(not ok or fontPath == nil)("answers what wonderland asks a reader of fonts", function()
 	local face = assert(win32.provider.open(assert(fontPath), 0))
 

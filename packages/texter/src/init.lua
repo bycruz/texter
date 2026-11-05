@@ -51,6 +51,7 @@ local BACKENDS = {
 ---@field available fun(): boolean
 ---@field why fun(): string?
 ---@field face fun(path: string, index: number?): texter.Face?, string?
+---@field faceBytes fun(content: string, index: number?): texter.Face?, string?
 ---@field shape fun(face: texter.Face, text: string, pixelHeight: number, opts: texter.ShapeOpts?): texter.Line
 ---@field ink fun(face: texter.Face, glyph: number, pixelHeight: number): texter.Ink
 ---@field penOf fun(line: texter.Line, byte: number): number
@@ -169,6 +170,19 @@ function texter.face(path, index)
 	assert(backend, texter.why())
 
 	return backend.face(path, index)
+end
+
+--- Reads a font from its bytes rather than from a file. What it is read as is the platform's own
+--- reader, the same as `face`, and what an app does with the bytes -- a font bundled into a
+--- compiled binary, a download, a test -- is nothing this has to know about.
+---@param content string
+---@param index number?
+---@return texter.Face? face
+---@return string? err
+function texter.faceBytes(content, index)
+	assert(backend, texter.why())
+
+	return backend.faceBytes(content, index)
 end
 
 --- Shapes a line: the glyphs it is drawn from, in the order a screen draws them, each with where it

@@ -90,6 +90,8 @@ ffi.cdef [[
 
 	HANDLE AddFontResourceExW(const WCHAR *path, DWORD flags, void *reserved);
 	BOOL RemoveFontResourceExW(const WCHAR *path, DWORD flags, void *reserved);
+	HANDLE AddFontMemResourceEx(const void *font, DWORD size, void *reserved, DWORD *count);
+	BOOL RemoveFontMemResourceEx(HANDLE handle);
 	HGDIOBJ SelectObject(HDC context, HGDIOBJ object);
 	HGDIOBJ GetStockObject(int object);
 	HDC CreateCompatibleDC(HDC context);
@@ -159,6 +161,9 @@ local win32 = {}
 ---@field path string
 ---@field index number
 ---@field family string
+---@field data string? # The font's bytes, where it was registered from memory rather than from `path`
+---@field buffer ffi.cdata*? # Those bytes where the system reads them, kept for as long as the face
+---@field memory HANDLE? # What AddFontMemResourceEx answered, kept for as long as the face
 ---@field context HDC # A device context with the font selected into it, kept
 ---@field font HANDLE
 ---@field height number
@@ -305,6 +310,38 @@ local function grow(units, glyphs)
 	offsets = ffi.new("GOFFSET[?]", room)
 end
 
+--- A face of a family GDI has already been given, whether from a file or from memory.
+---@param family string
+---@param path string
+---@param index number?
+---@param memory HANDLE?
+---@param data string?
+---@param buffer ffi.cdata*?
+---@return texter.win32.Face
+local function fromFamily(family, path, index, memory, data, buffer)
+	local face = setmetatable({
+		path = path,
+		index = index or 0,
+		family = family,
+		data = data,
+		buffer = buffer,
+		memory = memory,
+		context = gdi.CreateCompatibleDC(nil),
+		font = nil,
+		height = 0,
+		stack = ffi.new("unsigned char[?]", 1 << 16),
+		room = 1 << 16,
+		cache = ffi.new("SCRIPT_CACHE[1]"),
+		distant = {},
+	}, { __index = Face })
+
+	-- A font of the family is made at a size, and a device context with none selected in it is a
+	-- context nothing is measured in: the size a caller asks for is what makes the first one.
+	face:size(12)
+
+	return face
+end
+
 --- Reads a font file: it is registered with the process, its family is read out of it, and a font
 --- of that family is made at the size it is asked for.
 ---@param path string
@@ -334,24 +371,33 @@ function win32.face(path, index)
 		return nil, "windows would not take the font " .. path
 	end
 
-	local face = setmetatable({
-		path = path,
-		index = index or 0,
-		family = family,
-		context = gdi.CreateCompatibleDC(nil),
-		font = nil,
-		height = 0,
-		stack = ffi.new("unsigned char[?]", 1 << 16),
-		room = 1 << 16,
-		cache = ffi.new("SCRIPT_CACHE[1]"),
-		distant = {},
-	}, { __index = Face })
+	return fromFamily(family, path, index)
+end
 
-	-- A font of the family is made at a size, and a device context with none selected in it is a
-	-- context nothing is measured in: the size a caller asks for is what makes the first one.
-	face:size(12)
+--- Reads a font from its bytes: Windows registers the buffer with the process and the properties
+--- are read out of the same bytes, so no file is made.
+---@param content string
+---@param index number?
+---@return texter.win32.Face? face
+---@return string? err
+function win32.faceBytes(content, index)
+	local family = sfnt.family(content)
 
-	return face
+	if family == nil then
+		return nil, "the embedded font says no family name, so GDI cannot be asked for it"
+	end
+
+	local buffer = ffi.new("unsigned char[?]", #content)
+	ffi.copy(buffer, content, #content)
+
+	local count = ffi.new("DWORD[1]")
+	local memory = gdi.AddFontMemResourceEx(buffer, #content, nil, count)
+
+	if memory == nil then
+		return nil, "windows would not take the embedded font"
+	end
+
+	return fromFamily(family, "<memory>", index, memory, content, buffer)
 end
 
 --- One font of this family, at the character height GDI is asked for: a negative height is what
@@ -802,6 +848,9 @@ end
 win32.provider = {
 	open = function(path, index)
 		return win32.face(path, index)
+	end,
+	openBytes = function(content, index)
+		return win32.faceBytes(content, index)
 	end,
 	shape = function(face, text, pixelHeight, opts)
 		return win32.shape(face, text, pixelHeight, opts)

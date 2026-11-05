@@ -111,6 +111,8 @@ ffi.cdef [[
 	int FT_Init_FreeType(FT_Library *library);
 	int FT_Done_FreeType(FT_Library library);
 	int FT_New_Face(FT_Library library, const char *path, long index, FT_Face *face);
+	int FT_New_Memory_Face(FT_Library library, const unsigned char *file_base, long file_size, long index,
+		FT_Face *face);
 	int FT_Done_Face(FT_Face face);
 	int FT_Select_Charmap(FT_Face face, unsigned int encoding);
 	unsigned int FT_Get_Char_Index(FT_Face face, unsigned long codepoint);
@@ -201,6 +203,8 @@ local freetype = {}
 ---@field path string
 ---@field index number
 ---@field handle texter.freetype.ffi.Face
+---@field data string? # The font's bytes, where it was read from memory rather than from `path`
+---@field buffer ffi.cdata*? # Those bytes in memory FreeType reads, which has to outlive the face
 ---@field family string? # What the font calls itself, where it says
 ---@field style string?
 ---@field private height number # The pixel height the face is at, which is what it is not asked twice
@@ -279,6 +283,43 @@ function freetype.em(handle, pixelHeight)
 	return scaleFor(handle, pixelHeight) * handle.units_per_EM
 end
 
+--- A face from a handle FreeType has already made: the names it calls itself, the character map a
+--- codepoint is looked up in, and the buffers an ink is copied through.
+---@param handle texter.freetype.ffi.Face
+---@param path string
+---@param index number?
+---@param data string?
+---@param buffer ffi.cdata*?
+---@return texter.freetype.Face
+local function fromHandle(handle, path, index, data, buffer)
+	local face = setmetatable({
+		path = path,
+		index = index or 0,
+		handle = handle,
+		data = data,
+		buffer = buffer,
+		height = 0,
+		room = STACK,
+		stack = ffi.new("unsigned char[?]", STACK),
+	}, Face)
+
+	local names = handle
+
+	if names.family_name ~= nil then
+		face.family = ffi.string(names.family_name)
+	end
+
+	if names.style_name ~= nil then
+		face.style = ffi.string(names.style_name)
+	end
+
+	-- A font states its glyphs in more than one character map, and which of them is asked for
+	-- decides whether a codepoint is the glyph it looks like: the Unicode one is what it means.
+	library.FT_Select_Charmap(handle, UNICODE)
+
+	return face
+end
+
 ---@param path string
 ---@param index number?
 ---@return texter.freetype.Face? face
@@ -295,30 +336,31 @@ function freetype.open(path, index)
 		return nil, string.format("%s is not a font FreeType can read (error %d)", path, failure)
 	end
 
-	local face = setmetatable({
-		path = path,
-		index = index or 0,
-		handle = handle[0],
-		height = 0,
-		room = STACK,
-		stack = ffi.new("unsigned char[?]", STACK),
-	}, Face)
+	return fromHandle(handle[0], path, index)
+end
 
-	local names = face.handle
-
-	if names.family_name ~= nil then
-		face.family = ffi.string(names.family_name)
+--- A face from the bytes of a font rather than from a file: FreeType reads the buffer for as long
+--- as the face lives, so the buffer is kept on the face.
+---@param content string
+---@param index number?
+---@return texter.freetype.Face? face
+---@return string? err
+function freetype.openBytes(content, index)
+	if library == nil then
+		return nil, freetype.why()
 	end
 
-	if names.style_name ~= nil then
-		face.style = ffi.string(names.style_name)
+	local buffer = ffi.new("unsigned char[?]", #content)
+	ffi.copy(buffer, content, #content)
+
+	local handle = ffi.new("FT_Face[1]")
+	local failure = library.FT_New_Memory_Face(instance(), buffer, #content, index or 0, handle)
+
+	if failure ~= 0 or handle[0] == nil then
+		return nil, string.format("the embedded font is not a font FreeType can read (error %d)", failure)
 	end
 
-	-- A font states its glyphs in more than one character map, and which of them is asked for
-	-- decides whether a codepoint is the glyph it looks like: the Unicode one is what it means.
-	library.FT_Select_Charmap(face.handle, UNICODE)
-
-	return face
+	return fromHandle(handle[0], "<memory>", index, content, buffer)
 end
 
 --- Puts the face at the em a pixel height comes to, in sixty-fourths of a pixel: a size rounded to

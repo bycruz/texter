@@ -78,6 +78,12 @@ local function contentOf(face)
 		return content
 	end
 
+	if face.data ~= nil then
+		contents[face] = face.data
+
+		return face.data
+	end
+
 	local file = io.open(face.path, "rb")
 
 	if file == nil then
@@ -109,6 +115,25 @@ function texter.face(path, index)
 		return nil, "Could not read " .. path
 	end
 
+	shapedFonts[face] = {}
+
+	return face
+end
+
+--- A face from the bytes of a font rather than from a file: the reader and the shaper are handed
+--- the same bytes, and neither reads a path.
+---@param content string
+---@param index number?
+---@return texter-freetype.Face? face
+---@return string? err
+function texter.faceBytes(content, index)
+	local face, err = freetype.openBytes(content, index)
+
+	if face == nil then
+		return nil, err
+	end
+
+	contents[face] = content
 	shapedFonts[face] = {}
 
 	return face
@@ -255,6 +280,9 @@ end
 texter.provider = {
 	open = function(path, index)
 		return freetype.open(path, index)
+	end,
+	openBytes = function(content, index)
+		return texter.faceBytes(content, index)
 	end,
 	shape = function(face, text, pixelHeight, opts)
 		return texter.shape(face, text, pixelHeight, opts)
