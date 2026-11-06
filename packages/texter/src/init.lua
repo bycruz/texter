@@ -53,7 +53,8 @@ local BACKENDS = {
 ---@field face fun(path: string, index: number?): texter.Face?, string?
 ---@field faceBytes fun(content: string, index: number?): texter.Face?, string?
 ---@field shape fun(face: texter.Face, text: string, pixelHeight: number, opts: texter.ShapeOpts?): texter.Line
----@field ink fun(face: texter.Face, glyph: number, pixelHeight: number): texter.Ink
+---@field ink fun(face: texter.Face, glyph: number, pixelHeight: number, opts: texter.InkOpts?): texter.Ink
+---@field subpixel boolean? # Whether `ink` draws a glyph at `opts.offset`, or always at a whole pixel
 ---@field penOf fun(line: texter.Line, byte: number): number
 ---@field byteAt fun(line: texter.Line, x: number): number
 
@@ -85,6 +86,15 @@ local BACKENDS = {
 ---@class texter.ShapeOpts
 ---@field direction "ltr" | "rtl" | "auto"?
 ---@field language string?
+
+--- What the ink of a glyph may be asked for beyond the glyph and the size.
+---
+--- A line placed with the font's own advances lands glyphs between pixels, and a glyph drawn there
+--- is not the same picture as one drawn on a whole pixel: `offset` is where the pen actually is.
+--- What a backend does with it is what its `subpixel` says -- the one that draws a glyph at the
+--- fraction, and the one that cannot draw it at the whole pixel the pen is at.
+---@class texter.InkOpts
+---@field offset number? # How far right of the pen, in pixels, the glyph's origin sits: from nought up to one
 
 --- One glyph of a shaped line, in whole pixels.
 ---@class texter.Glyph
@@ -202,15 +212,18 @@ function texter.shape(face, text, pixelHeight, opts)
 	return backend.shape(face, text, pixelHeight, opts)
 end
 
---- The ink of one glyph of a font at a size.
+--- The ink of one glyph of a font at a size, drawn where the pen is: `opts.offset` is how far to
+--- the right of the pen, in pixels, the glyph's origin sits, for a line placed with fractional
+--- advances. What a backend does with it is what its `subpixel` says.
 ---@param face texter.Face
 ---@param glyph number
 ---@param pixelHeight number
+---@param opts texter.InkOpts?
 ---@return texter.Ink
-function texter.ink(face, glyph, pixelHeight)
+function texter.ink(face, glyph, pixelHeight, opts)
 	assert(backend, texter.why())
 
-	return backend.ink(face, glyph, pixelHeight)
+	return backend.ink(face, glyph, pixelHeight, opts)
 end
 
 --- How tall a line of a font is at a size, in pixels: what it reaches above the baseline, what it
