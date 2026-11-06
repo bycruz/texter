@@ -123,8 +123,11 @@ ffi.cdef [[
 	typedef unsigned long ULONG;
 	typedef long HRESULT;
 
-	// A globally unique identifier: four bytes, then two, then two, then eight, little endian.
-	typedef struct { unsigned int a; unsigned short b, c; unsigned char d[8]; } IID;
+	// A globally unique identifier: four bytes, then two, then two, then eight, little endian. A name
+	// of its own, and the factory below bound under one: a name declared twice in a process is the
+	// first one's, whoever declares it -- an audio library's `IID`, and the COM entry points that take
+	// one, would be read as this struct instead of its own and every call through them refused.
+	typedef struct { unsigned int a; unsigned short b, c; unsigned char d[8]; } TEXTER_IID;
 
 	typedef struct IDWriteFactory2 IDWriteFactory2;
 	typedef struct IDWriteGdiInterop IDWriteGdiInterop;
@@ -224,7 +227,8 @@ ffi.cdef [[
 
 	struct IDWriteGlyphRunAnalysis { const IDWriteGlyphRunAnalysisVtbl *vtbl; };
 
-	HRESULT DWriteCreateFactory(UINT type, const IID *iid, void **factory);
+	HRESULT TEXTER_DWriteCreateFactory(UINT type, const TEXTER_IID *iid, void **factory)
+		__asm__("DWriteCreateFactory");
 ]]
 
 -- GGO_GRAY8_BITMAP: the glyph as eight bits of coverage a pixel, which is what an atlas packs. What
@@ -298,7 +302,7 @@ do
 
 	if isLoaded then
 		-- IID_IDWriteFactory2, as `dwrite_2.h` spells it: 0439fc60-ca44-4994-8dee-3a9af7b732ec.
-		local iid = ffi.new("IID")
+		local iid = ffi.new("TEXTER_IID")
 
 		iid.a = 0x0439fc60
 		iid.b = 0xca44
@@ -307,7 +311,7 @@ do
 			ffi.new("unsigned char[8]", 0x8d, 0xee, 0x3a, 0x9a, 0xf7, 0xb7, 0x32, 0xec), 8)
 
 		local isCalled, result = pcall(function()
-			return library.DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, iid, madeFactory)
+			return library.TEXTER_DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, iid, madeFactory)
 		end)
 
 		if isCalled and result == 0 then

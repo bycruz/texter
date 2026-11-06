@@ -52,6 +52,33 @@ test.skipIf(not ok)("loads the platform's own libraries", function()
 	test.equal(win32.why(), nil)
 end)
 
+test.skipIf(not ok)("leaves the COM names to the rest of the process", function()
+	-- A name declared twice in a process is the first one's, whoever declares it: what this module
+	-- declares for DirectWrite -- a GUID, and the factory that takes one -- is named for itself, so
+	-- that an audio library's `IID` and its `CoCreateInstance` are its own. What is declared here is
+	-- what that library declares, after this module has been loaded.
+	test.equal(pcall(ffi.typeof, "IID"), false, "texter declares no IID of its own")
+
+	pcall(ffi.cdef, [[
+		typedef struct { uint32_t Data1; uint16_t Data2; uint16_t Data3; uint8_t Data4[8]; } TEST_GUID;
+		typedef TEST_GUID TEST_IID;
+		int32_t CoCreateInstance(const TEST_GUID *clsid, void *outer, uint32_t context,
+			const TEST_IID *iid, void **out);
+	]])
+
+	local ole32 = ffi.load("ole32")
+	local guid = ffi.new("TEST_GUID")
+	local out = ffi.new("void *[1]")
+
+	-- Called rather than trusted by name: a declaration the process already had refuses the call
+	-- before it reaches COM, which is what happened when this module took `IID` for itself.
+	local called, err = pcall(function()
+		return ole32.CoCreateInstance(guid, nil, 1, guid, out)
+	end)
+
+	test.truthy(called, tostring(err))
+end)
+
 test.skipIf(not ok or fontPath == nil)("reads a font file, and says what it is called", function()
 	local face = assert(win32.face(assert(fontPath), 0))
 
