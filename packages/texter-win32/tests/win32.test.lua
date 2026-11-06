@@ -3,6 +3,7 @@
 -- These run on windows and nowhere else: the module loads the platform's own libraries, so a
 -- machine without them skips rather than fails.
 local test = require("lde-test")
+local ffi = require("ffi")
 
 local ok, win32 = pcall(require, "texter-win32")
 
@@ -89,6 +90,103 @@ test.skipIf(not ok or fontPath == nil)("gives the ink of a glyph, and none for a
 
 	test.equal(space.width, 0, "and a space has none")
 end)
+
+--- The ink of a glyph copied into plain values, because what a caller is handed is the face's own
+--- buffer: the next glyph asked of the face is written over it, and a test that compares two inks
+--- has to take the first one away before it asks for the second.
+---
+--- `mass` is where the glyph's coverage balances, as a distance from the pen -- the box's `left`
+--- and the middle of each pixel of it -- which is what says whether the pen moved; `isCoarse` is
+--- whether every pixel is a multiple of four, which is a ramp of the sixty-four steps GDI's
+--- grayscale is spread over.
+---@param ink texter.Ink
+---@return table
+local function snap(ink)
+	local count = ink.width * ink.height
+	local pixels = assert(ink.pixels)
+	local mass, weight = 0.0, 0
+	local isCoarse = true
+
+	for row = 0, ink.height - 1 do
+		for column = 0, ink.width - 1 do
+			local value = pixels[row * ink.width + column]
+
+			mass = mass + (ink.left + column + 0.5) * value
+			weight = weight + value
+
+			if value % 4 ~= 0 then
+				isCoarse = false
+			end
+		end
+	end
+
+	return {
+		width = ink.width,
+		height = ink.height,
+		left = ink.left,
+		top = ink.top,
+		isCoarse = isCoarse,
+		mass = weight > 0 and mass / weight or 0.0,
+		pixels = count > 0 and ffi.string(pixels, count) or "",
+	}
+end
+
+test.skipIf(not ok or fontPath == nil or not win32.subpixel)("draws a glyph through DirectWrite rather than GDI",
+	function()
+		-- GDI draws a glyph from a bitmap hinted to the pixel grid and answers in sixty-five steps of
+		-- coverage, which is the worst text windows makes; DirectWrite draws it from the outline in
+		-- eight bits of coverage a pixel, which is what the rest of windows draws its text with. What
+		-- says which of the two drew a glyph is its coverage, and that it is not the same picture.
+		local face = assert(win32.face(assert(fontPath), 0))
+		local glyph = face:glyphFor(0x41)
+		local ink = snap(win32.ink(face, glyph, 24, { offset = 0 }))
+		local hinted = snap(face:hinted(glyph))
+
+		test.equal(win32.provider.subpixel, true, "the provider says it draws at a fraction of a pixel")
+		test.greater(ink.width, 0, "the letter has ink")
+		test.falsy(ink.isCoarse, "and its coverage is not a ramp of fours")
+		test.truthy(ink.pixels ~= hinted.pixels, "and it is not the picture GDI draws of the same glyph")
+	end)
+
+test.skipIf(not ok or fontPath == nil or not win32.subpixel)(
+	"draws a glyph half a pixel along when the pen is half a pixel along",
+	function()
+		-- A line placed with the font's own advances leaves glyphs between pixels, and a glyph drawn
+		-- at half a pixel is a different picture of the outline, not the picture of a whole pixel
+		-- moved half of one: the stem covers the two pixels it sits between in unequal amounts.
+		local face = assert(win32.face(assert(fontPath), 0))
+		local glyph = face:glyphFor(0x41)
+		local whole = snap(win32.ink(face, glyph, 24, { offset = 0 }))
+		local half = snap(win32.ink(face, glyph, 24, { offset = 0.5 }))
+
+		test.greater(half.width, 0, "the glyph at half a pixel has ink")
+		test.truthy(half.pixels ~= whole.pixels or half.width ~= whole.width or half.left ~= whole.left,
+			"and it is not the coverage of the glyph at a whole pixel")
+
+		local moved = half.mass - whole.mass
+
+		test.truthy(math.abs(moved - 0.5) <= 0.25,
+			string.format("its ink weighs %.2f of a pixel further right", moved))
+	end)
+
+test.skipIf(not ok or fontPath == nil or not win32.subpixel)("draws a font read from its bytes with DirectWrite too",
+	function()
+		-- What an app brings with it is bytes and not a file, and DirectWrite is asked for those
+		-- through the font windows registered from them: the ink is the same rasteriser's.
+		local file = assert(io.open(assert(fontPath), "rb"))
+		local content = file:read("*a")
+
+		file:close()
+
+		local face = assert(win32.faceBytes(content, 0))
+		local glyph = face:glyphFor(0x41)
+		local ink = snap(win32.ink(face, glyph, 24, { offset = 0 }))
+		local hinted = snap(face:hinted(glyph))
+
+		test.greater(ink.width, 0, "the embedded font has ink")
+		test.falsy(ink.isCoarse, "and its coverage is not a ramp of fours")
+		test.truthy(ink.pixels ~= hinted.pixels, "and DirectWrite rather than GDI drew it")
+	end)
 
 test.skipIf(not ok or fontPath == nil)("shapes a line into the glyphs it is drawn from", function()
 	local face = assert(win32.face(assert(fontPath), 0))

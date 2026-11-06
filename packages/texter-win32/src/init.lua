@@ -7,10 +7,19 @@
 -- `ScriptShape` and `ScriptPlace` are -- and GDI draws those glyphs and measures the font they are
 -- drawn from.
 --
+-- What draws a glyph, where the machine has it, is a third: DirectWrite. GDI's grayscale is hinted
+-- to the pixel grid and counts to sixty-five steps of coverage, which is the worst text windows
+-- makes; DirectWrite's natural symmetric grayscale is what the rest of windows draws, eight bits of
+-- coverage a pixel, with the outline where the font puts it. What it has as well is a place on the
+-- baseline that is a fraction of a pixel, which is what a line placed with the font's own advances
+-- needs: a glyph is drawn where the pen actually is rather than drawn on a whole pixel and moved
+-- there as a picture. GDI is still what shapes a line and measures a font, and what draws a glyph on
+-- a machine whose DirectWrite is too old to be asked.
+--
 -- It has been run on a windows machine, and what is written below is what that machine answered
 -- with. Two things about it were worked out from the machine rather than read off the
--- documentation: the coverage a glyph comes back with counts to sixty-four, which is what an
--- atlas is scaled from, and the matrix a glyph is asked for is four sixteen point sixteen longs
+-- documentation: the coverage GDI's grayscale comes back with counts to sixty-four, which is what
+-- an atlas is scaled from, and the matrix a glyph is asked for is four sixteen point sixteen longs
 -- rather than something shorter -- nothing about the wrong size of it is refused loudly, and every
 -- glyph in the font comes back as an error that reads like the glyph or the buffer being at fault.
 local ffi = require("ffi")
@@ -113,6 +122,127 @@ ffi.cdef [[
 		WORD *glyphs, WORD *clusters, SCRIPT_VISATTR *attributes, int *shaped);
 	UINT ScriptPlace(HDC context, SCRIPT_CACHE *cache, const WORD *glyphs, int count, const SCRIPT_VISATTR *attributes,
 		SCRIPT_ANALYSIS *analysis, int *advances, GOFFSET *offsets, ABC *abc);
+
+	// DirectWrite: the newer of the two rasterisers windows has, and the one the rest of windows
+	// draws its own text with. What it is reached through is com -- an object is a pointer to a
+	// pointer to a table of functions, each of which takes the object as its first argument -- and
+	// a call is the number of the table's slot, so every table below is written out in the order
+	// the header declares its methods: the slots this file does not call are `void *`, which keeps
+	// the ones it does call at the index the header gives them.
+	//
+	// The order is `dwrite.h`, `dwrite_1.h` and `dwrite_2.h`, where the method a slot holds is
+	// written in the header's own `IDWrite*Vtbl` struct; the index is counted from the three
+	// methods every com object has. A slot the interface adds as an overload of one before it --
+	// `CreateCustomRenderingParams` and `CreateGlyphRunAnalysis` are both declared three times, with
+	// more arguments each time -- is given a name of its own here: the field name is only a label for
+	// the slot, and two fields of one name in a struct are one field, at the first of the two.
+	typedef unsigned int UINT32;
+	typedef unsigned char BYTE;
+	typedef unsigned long ULONG;
+	typedef long HRESULT;
+
+	// A globally unique identifier: four bytes, then two, then two, then eight, little endian.
+	typedef struct { unsigned int a; unsigned short b, c; unsigned char d[8]; } IID;
+
+	typedef struct IDWriteFactory2 IDWriteFactory2;
+	typedef struct IDWriteGdiInterop IDWriteGdiInterop;
+	typedef struct IDWriteFontFace IDWriteFontFace;
+	typedef struct IDWriteGlyphRunAnalysis IDWriteGlyphRunAnalysis;
+
+	typedef struct { float m11, m12, m21, m22, dx, dy; } DWRITE_MATRIX;
+	typedef struct { float advanceOffset, ascenderOffset; } DWRITE_GLYPH_OFFSET;
+
+	// One run of glyphs: what a glyph's bitmap is asked for. The advances are the pen's and not the
+	// glyph's here -- one nought, because what is wanted is the picture of one glyph at a place on
+	// the baseline rather than a line of them -- and the offsets are nothing, which is what says so.
+	typedef struct {
+		IDWriteFontFace *fontFace;
+		float fontEmSize;
+		UINT32 glyphCount;
+		const unsigned short *glyphIndices;
+		const float *glyphAdvances;
+		const DWRITE_GLYPH_OFFSET *glyphOffsets;
+		BOOL isSideways;
+		UINT32 bidiLevel;
+	} DWRITE_GLYPH_RUN;
+
+	typedef struct {
+		void *QueryInterface; // 0
+		void *AddRef;         // 1
+		void *Release;        // 2
+		// IDWriteFactory
+		void *GetSystemFontCollection;    // 3
+		void *CreateCustomFontCollection; // 4
+		void *RegisterFontCollectionLoader; // 5
+		void *UnregisterFontCollectionLoader; // 6
+		void *CreateFontFileReference;    // 7
+		void *CreateCustomFontFileReference; // 8
+		void *CreateFontFace;             // 9
+		void *CreateRenderingParams;      // 10
+		void *CreateMonitorRenderingParams; // 11
+		void *CreateCustomRenderingParams; // 12
+		void *RegisterFontFileLoader;     // 13
+		void *UnregisterFontFileLoader;   // 14
+		void *CreateTextFormat;           // 15
+		void *CreateTypography;           // 16
+		HRESULT (*GetGdiInterop)(IDWriteFactory2 *, IDWriteGdiInterop **); // 17
+		void *CreateTextLayout;           // 18
+		void *CreateGdiCompatibleTextLayout; // 19
+		void *CreateEllipsisTrimmingSign; // 20
+		void *CreateTextAnalyzer;         // 21
+		void *CreateNumberSubstitution;   // 22
+		void *CreateGlyphRunAnalysis0;    // 23
+		// IDWriteFactory1
+		void *GetEudcFontCollection;      // 24
+		void *CreateCustomRenderingParams1; // 25
+		// IDWriteFactory2
+		void *GetSystemFontFallback;      // 26
+		void *CreateFontFallbackBuilder;  // 27
+		void *TranslateColorGlyphRun;     // 28
+		void *CreateCustomRenderingParams2; // 29
+		// The other call this file makes: a glyph's coverage as grayscale of its own, at a place on
+		// the baseline that may be a fraction of a pixel. Only a factory of 8.1 or later has it.
+		HRESULT (*CreateGlyphRunAnalysis)(IDWriteFactory2 *, const DWRITE_GLYPH_RUN *run,
+			const DWRITE_MATRIX *transform, int rendering, int measuring, int gridFit, int antialias,
+			float x, float y, IDWriteGlyphRunAnalysis **analysis); // 30
+	} IDWriteFactory2Vtbl;
+
+	struct IDWriteFactory2 { const IDWriteFactory2Vtbl *vtbl; };
+
+	typedef struct {
+		void *QueryInterface; // 0
+		void *AddRef;         // 1
+		void *Release;        // 2
+		void *CreateFontFromLOGFONT;    // 3
+		void *ConvertFontToLOGFONT;     // 4
+		void *ConvertFontFaceToLOGFONT; // 5
+		HRESULT (*CreateFontFaceFromHdc)(IDWriteGdiInterop *, HDC, IDWriteFontFace **); // 6
+		void *CreateBitmapRenderTarget; // 7
+	} IDWriteGdiInteropVtbl;
+
+	struct IDWriteGdiInterop { const IDWriteGdiInteropVtbl *vtbl; };
+
+	typedef struct {
+		void *QueryInterface; // 0
+		void *AddRef;         // 1
+		ULONG (*Release)(IDWriteFontFace *); // 2
+	} IDWriteFontFaceVtbl;
+
+	struct IDWriteFontFace { const IDWriteFontFaceVtbl *vtbl; };
+
+	typedef struct {
+		void *QueryInterface; // 0
+		void *AddRef;         // 1
+		ULONG (*Release)(IDWriteGlyphRunAnalysis *); // 2
+		HRESULT (*GetAlphaTextureBounds)(IDWriteGlyphRunAnalysis *, int type, RECT *bounds); // 3
+		HRESULT (*CreateAlphaTexture)(IDWriteGlyphRunAnalysis *, int type, const RECT *bounds, BYTE *values,
+			UINT32 size); // 4
+		void *GetAlphaBlendParams; // 5
+	} IDWriteGlyphRunAnalysisVtbl;
+
+	struct IDWriteGlyphRunAnalysis { const IDWriteGlyphRunAnalysisVtbl *vtbl; };
+
+	HRESULT DWriteCreateFactory(UINT type, const IID *iid, void **factory);
 ]]
 
 -- GGO_GRAY8_BITMAP: the glyph as eight bits of coverage a pixel, which is what an atlas packs. What
@@ -147,6 +277,20 @@ local CLIP_DEFAULT_PRECIS = 0
 local ANTIALIASED_QUALITY = 4
 local FF_DONTCARE = 0
 
+-- How a glyph is asked of DirectWrite: natural symmetric grayscale, which is a glyph drawn from its
+-- outline at eight bits of coverage a pixel with the stems where the font puts them. GDI's
+-- grayscale is hinted to the pixel grid and comes back in sixty-five steps, which is coarser than
+-- the outline deserves. The grid fit is left at its default rather than turned off, because what
+-- makes a font legible at fifteen pixels is the outline being fitted to the grid at all; the
+-- fraction of a pixel the pen is at is folded in on top of that, which is what the analysis is
+-- asked for at a baseline that is not a whole number of pixels.
+local DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC = 5
+local DWRITE_MEASURING_MODE_NATURAL = 0
+local DWRITE_GRID_FIT_MODE_DEFAULT = 0
+local DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE = 1
+local DWRITE_TEXTURE_ALIASED_1x1 = 0
+local DWRITE_FACTORY_TYPE_SHARED = 0
+
 -- The character height a line is *placed* at, whatever height it is drawn at. GDI hints a font to
 -- the pixel grid, and what Uniscribe places a line with at a small size is each glyph's advance
 -- rounded to whole pixels, nearly always up: a word of Inter at fifteen pixels comes to two pixels
@@ -158,6 +302,56 @@ local DESIGN_HEIGHT = 2048
 local gdi = ffi.load("gdi32")
 local kernel = ffi.load("kernel32")
 local usp = ffi.load("usp10")
+
+-- What DirectWrite is reached through where the machine has the version that draws a glyph at a
+-- fraction of a pixel: one factory for the process, and one GDI interop from it, through which a
+-- font GDI already has -- from a file the system was given, or from bytes an app brought -- becomes
+-- a DirectWrite font face.
+--
+-- It is made once, when this module is loaded, rather than on the first glyph drawn: whether it is
+-- there is what `subpixel` says, and a caller is told that before it asks for a glyph. A factory
+-- before 8.1 is a factory without the glyph run analysis that takes a text antialias mode, and what
+-- this asks for is the 8.1 interface; where the interface is not there, or the library is not,
+-- every glyph is drawn by GDI below, which ignores the fraction.
+--
+-- The library is kept with the objects made from it: a library LuaJIT loads is closed when the
+-- object that loaded it is collected, and every pointer below is into the code and tables of that
+-- library -- a factory whose library was closed is a table of addresses of nothing.
+local direct = { library = nil, factory = nil, interop = nil }
+
+-- Where a call writes the object it made, kept for as long as the module is: a pointer read out of
+-- one is the whole handle there is on what windows made.
+local madeFactory = ffi.new("void *[1]")
+local madeInterop = ffi.new("IDWriteGdiInterop *[1]")
+
+do
+	local isLoaded, library = pcall(ffi.load, "dwrite")
+
+	if isLoaded then
+		-- IID_IDWriteFactory2, as `dwrite_2.h` spells it: 0439fc60-ca44-4994-8dee-3a9af7b732ec.
+		local iid = ffi.new("IID")
+
+		iid.a = 0x0439fc60
+		iid.b = 0xca44
+		iid.c = 0x4994
+		ffi.copy(iid.d,
+			ffi.new("unsigned char[8]", 0x8d, 0xee, 0x3a, 0x9a, 0xf7, 0xb7, 0x32, 0xec), 8)
+
+		local isCalled, result = pcall(function()
+			return library.DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, iid, madeFactory)
+		end)
+
+		if isCalled and result == 0 then
+			direct.library, direct.factory = library, ffi.cast("IDWriteFactory2 *", madeFactory[0])
+
+			if direct.factory.vtbl.GetGdiInterop(direct.factory, madeInterop) ~= 0 then
+				direct.factory = nil
+			else
+				direct.interop = madeInterop[0]
+			end
+		end
+	end
+end
 
 -- What GDI is handed is a family, and a file is what an app has: the family is read out of the
 -- file's own name table, which is `texter-common`'s because every platform needs the same thing.
@@ -175,6 +369,8 @@ local win32 = {}
 ---@field context HDC # A device context with the font selected into it, kept
 ---@field font HANDLE
 ---@field height number
+---@field em number # The character height the font selected now was made at: what DirectWrite draws a glyph at
+---@field direct ffi.cdata*|false? # The IDWriteFontFace of this family, made once; false where there is none to make
 ---@field stack ffi.cdata* # Where a glyph's ink is copied, kept
 ---@field room number # How many pixels that stack holds, grown as glyphs need
 ---@field cache ffi.cdata* # The SCRIPT_CACHE of the font this face has selected, given back when it changes
@@ -297,6 +493,22 @@ local rawRoom = 0
 ---@type ffi.cdata*
 local raw = nil
 
+-- What a glyph is asked of DirectWrite with and where the answer is read, made once for the same
+-- reason: a run of one glyph, whose advance is nought -- a pen that does not move is a glyph drawn
+-- where it was put rather than after itself -- and the box its coverage comes back in. Nothing here
+-- changes from glyph to glyph but the font face, the em and the glyph itself, and what is written
+-- into the box is the face's own stack, as GDI's bitmap is.
+local glyphIndex = ffi.new("unsigned short[1]")
+local glyphAdvance = ffi.new("float[1]", 0.0)
+local glyphBounds = ffi.new("RECT")
+local analysisOut = ffi.new("IDWriteGlyphRunAnalysis *[1]")
+local fontFaceOut = ffi.new("IDWriteFontFace *[1]")
+local glyphRun = ffi.new("DWRITE_GLYPH_RUN")
+
+glyphRun.glyphCount = 1
+glyphRun.glyphIndices = glyphIndex
+glyphRun.glyphAdvances = glyphAdvance
+
 -- What Uniscribe answers the counts of, made once. What it keeps of a shaped font is the cache
 -- each face holds: what a cache holds is one font *at one size* in one device context, and a
 -- cache kept across a font change answers a line of the new size with the metrics of the old
@@ -340,6 +552,8 @@ local function fromFamily(family, path, index, memory, data, buffer)
 		context = gdi.CreateCompatibleDC(nil),
 		font = nil,
 		height = 0,
+		em = 0,
+		direct = nil,
 		stack = ffi.new("unsigned char[?]", 1 << 16),
 		room = 1 << 16,
 		cache = ffi.new("SCRIPT_CACHE[1]"),
@@ -524,6 +738,11 @@ function Face:size(pixelHeight)
 
 	self.font, self.height = made, pixelHeight
 	self.design, self.designScale = design, chosen / designHeight
+
+	-- The height GDI was asked for is the font's em in pixels, and an em is what DirectWrite draws a
+	-- glyph at: what it is handed is this, rather than the height of a line, which is what a caller
+	-- of this asks for.
+	self.em = chosen
 end
 
 --- What Uniscribe has kept of the font this face had selected, given back.
@@ -622,12 +841,118 @@ function Face:advance(codepoint, pixelHeight)
 	return tonumber(sizes[0].abcA + sizes[0].abcB + sizes[0].abcC) * self.designScale
 end
 
----@param glyph number
----@param pixelHeight number
----@return texter.Ink
-function Face:inkOf(glyph, pixelHeight)
-	self:size(pixelHeight)
+--- The DirectWrite face of this family, made the first time a glyph is asked for and kept, or
+--- nothing where there is none to make.
+---
+--- A face is a typeface and not a size -- what is drawn at a size is a run of glyphs whose em is
+--- that size -- so one of them answers every size this face is asked for. What it is made from is
+--- the device context this face keeps with its font selected into it, which is what makes a font an
+--- app brought with it, registered from its bytes, answer the same way a font of the system's does.
+---@param self texter.win32.Face
+---@return ffi.cdata*?
+function Face:directFace()
+	if self.direct ~= nil then
+		return self.direct or nil
+	end
 
+	if direct.factory == nil then
+		self.direct = false
+
+		return nil
+	end
+
+	if direct.interop.vtbl.CreateFontFaceFromHdc(direct.interop, self.context, fontFaceOut) ~= 0 then
+		self.direct = false
+
+		return nil
+	end
+
+	self.direct = fontFaceOut[0]
+
+	return self.direct
+end
+
+--- A glyph as DirectWrite draws it, its origin at a fraction of a pixel to the right of the pen.
+---
+--- What a glyph is drawn from is its outline, rasterised where the pen is rather than resampled from
+--- a whole pixel afterwards: a stem that sits at half a pixel covers the two pixels either side of
+--- it in unequal amounts, which is what a caller packing an atlas from this and drawing it at whole
+--- pixels needs. The box comes back in whole pixels from the pen and the baseline, which is the
+--- same convention GDI's ink is in; the fraction moves the coverage inside the box, and grows it a
+--- pixel where the outline crosses into one the glyph at a whole pixel did not reach.
+---
+--- What is asked for is natural symmetric grayscale, which is how windows draws its own text: eight
+--- bits of coverage a pixel with the outline's own weight, rather than GDI's sixty-five hinted
+--- steps. What it costs is one analysis a glyph, which is what GDI's outline was.
+---@param self texter.win32.Face
+---@param dwriteFace ffi.cdata* # The IDWriteFontFace of this face
+---@param glyph number
+---@param offset number # How far right of the pen the glyph's origin is, in pixels, from nought to one
+---@return texter.Ink? ink # Nothing where DirectWrite answered nothing at all
+function Face:drawn(dwriteFace, glyph, offset)
+	glyphRun.fontFace = dwriteFace
+	glyphRun.fontEmSize = self.em
+	glyphIndex[0] = glyph
+
+	local result = direct.factory.vtbl.CreateGlyphRunAnalysis(direct.factory, glyphRun, nil,
+		DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, DWRITE_MEASURING_MODE_NATURAL, DWRITE_GRID_FIT_MODE_DEFAULT,
+		DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, offset, 0.0, analysisOut)
+
+	if result ~= 0 then
+		return nil
+	end
+
+	local analysis = analysisOut[0]
+
+	if analysis.vtbl.GetAlphaTextureBounds(analysis, DWRITE_TEXTURE_ALIASED_1x1, glyphBounds) ~= 0 then
+		analysis.vtbl.Release(analysis)
+
+		return nil
+	end
+
+	local left, top = tonumber(glyphBounds.left), tonumber(glyphBounds.top)
+	local width, height = tonumber(glyphBounds.right) - left, tonumber(glyphBounds.bottom) - top
+
+	-- A space, and a glyph a font has no picture of, are a box of nought wide.
+	if width <= 0 or height <= 0 then
+		analysis.vtbl.Release(analysis)
+
+		return NOTHING
+	end
+
+	local count = width * height
+
+	-- A glyph is as much room as its own box, the same as the GDI path: a large size of a wide
+	-- glyph is more than the room a font was opened with.
+	if count > self.room then
+		self.room = count
+		self.stack = ffi.new("unsigned char[?]", self.room)
+	end
+
+	local stack = self.stack
+
+	-- The coverage is one byte a pixel with no padding, which is what an atlas packs and what an
+	-- aliased texture of one by one is: the face's own stack is what it is written into.
+	if analysis.vtbl.CreateAlphaTexture(analysis, DWRITE_TEXTURE_ALIASED_1x1, glyphBounds, stack, count) ~= 0 then
+		analysis.vtbl.Release(analysis)
+
+		return nil
+	end
+
+	analysis.vtbl.Release(analysis)
+
+	return { width = width, height = height, left = left, top = top, pixels = stack }
+end
+
+--- A glyph as GDI draws it, which is what a machine without this DirectWrite is left with.
+---
+--- What GDI hands back is hinted to the pixel grid and counts to sixty-four steps of coverage, which
+--- is coarser than the eight bits a pixel holds. The fraction of the pen is not something it can be
+--- asked about: a glyph is drawn at the whole pixel it is at.
+---@param self texter.win32.Face
+---@param glyph number
+---@return texter.Ink
+function Face:hinted(glyph)
 	local metrics = rawMetrics
 	local transform = rawTransform
 	local size = gdi.GetGlyphOutlineW(self.context, glyph, GGO_GRAY8_BITMAP + GGO_GLYPH_INDEX, metrics, 0, nil,
@@ -681,6 +1006,34 @@ function Face:inkOf(glyph, pixelHeight)
 		top = -tonumber(metrics.gmptGlyphOrigin.y),
 		pixels = stack,
 	}
+end
+
+--- The ink of a glyph, drawn where the pen is.
+---
+--- The pen's place may be a fraction of a pixel -- a line laid out with the font's own advances
+--- leaves glyphs between pixels -- and what a glyph drawn there is, is one rasterised at that place
+--- rather than one drawn at a pixel and moved: `offset` is that fraction, and DirectWrite is what
+--- draws it. Where there is no DirectWrite -- or where it would not draw a glyph at all -- what is
+--- answered is GDI's, and the fraction is dropped: a glyph is drawn at the pixel it starts at.
+---@param self texter.win32.Face
+---@param glyph number
+---@param pixelHeight number
+---@param offset number?
+---@return texter.Ink
+function Face:inkOf(glyph, pixelHeight, offset)
+	self:size(pixelHeight)
+
+	local dwriteFace = self:directFace()
+
+	if dwriteFace ~= nil then
+		local ink = self:drawn(dwriteFace, glyph, offset or 0)
+
+		if ink ~= nil then
+			return ink
+		end
+	end
+
+	return self:hinted(glyph)
 end
 
 ---@param ink texter.Ink
@@ -831,12 +1184,18 @@ function win32.shape(face, text, pixelHeight, _opts)
 	return { glyphs = glyphs, width = x, rtl = rtl, runs = runs, text = text }
 end
 
+--- Whether a glyph is drawn at the fraction of a pixel the pen is at. DirectWrite is what can draw
+--- one there; GDI draws every glyph at a whole pixel, however it was asked, so a machine whose
+--- DirectWrite this is not says no and a caller places glyphs on whole pixels.
+win32.subpixel = direct.factory ~= nil
+
 ---@param face texter.win32.Face
 ---@param glyph number
 ---@param pixelHeight number
+---@param opts texter.InkOpts?
 ---@return texter.Ink
-function win32.ink(face, glyph, pixelHeight)
-	return face:inkOf(glyph, pixelHeight)
+function win32.ink(face, glyph, pixelHeight, opts)
+	return face:inkOf(glyph, pixelHeight, opts and opts.offset or 0)
 end
 
 ---@param face texter.win32.Face
@@ -895,9 +1254,10 @@ win32.provider = {
 	shape = function(face, text, pixelHeight, opts)
 		return win32.shape(face, text, pixelHeight, opts)
 	end,
-	ink = function(face, glyph, pixelHeight)
-		return win32.ink(face, glyph, pixelHeight)
+	ink = function(face, glyph, pixelHeight, opts)
+		return win32.ink(face, glyph, pixelHeight, opts)
 	end,
+	subpixel = win32.subpixel,
 }
 
 return win32

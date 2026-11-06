@@ -83,6 +83,21 @@ test.skipIf(not texter.available() or fontPath == nil)("shapes and measures thro
 	test.equal(texter.penOf(line, 0), 0, "the caret before it is at the start of the line")
 end)
 
+test.skipIf(not texter.available() or fontPath == nil)("asks for a glyph at a fraction of a pixel", function()
+	-- A caller that places a line with the font's own advances asks for each glyph at the fraction of
+	-- a pixel the pen is at. A backend that can draw one there says so with `subpixel`; one that
+	-- cannot draws it at the whole pixel, and either way what comes back is the glyph's ink.
+	local face = assert(texter.face(assert(fontPath), 0))
+	local glyph = assert(texter.shape(face, "H", 24).glyphs[1]).glyph
+	local ink = texter.ink(face, glyph, 24, { offset = 0.5 })
+
+	test.greater(ink.width, 0, "the glyph has ink at half a pixel")
+
+	if texter.backend.subpixel then
+		test.equal(texter.provider.subpixel, true, "and the provider says it draws at a fraction of one")
+	end
+end)
+
 test.skipIf(not texter.available() or fontPath == nil)("reads and shapes a face from its bytes", function()
 	local file = assert(io.open(assert(fontPath), "rb"))
 	local content = file:read("*a")
