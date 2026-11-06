@@ -1,27 +1,9 @@
--- Uniscribe and GDI: the text windows already has.
 --
 --   local texter = require("texter-win32")
 --
--- Two libraries that every windows has and no program ships: Uniscribe turns a string into glyphs
--- -- joining, reordering, and arranging a line of two directions, which is what `ScriptItemize`,
--- `ScriptShape` and `ScriptPlace` are -- and GDI draws those glyphs and measures the font they are
--- drawn from.
---
--- What draws a glyph, where the machine has it, is a third: DirectWrite. GDI's grayscale is hinted
--- to the pixel grid and counts to sixty-five steps of coverage, which is the worst text windows
--- makes; DirectWrite's natural symmetric grayscale is what the rest of windows draws, eight bits of
--- coverage a pixel, with the outline where the font puts it. What it has as well is a place on the
--- baseline that is a fraction of a pixel, which is what a line placed with the font's own advances
--- needs: a glyph is drawn where the pen actually is rather than drawn on a whole pixel and moved
--- there as a picture. GDI is still what shapes a line and measures a font, and what draws a glyph on
--- a machine whose DirectWrite is too old to be asked.
---
--- It has been run on a windows machine, and what is written below is what that machine answered
--- with. Two things about it were worked out from the machine rather than read off the
--- documentation: the coverage GDI's grayscale comes back with counts to sixty-four, which is what
--- an atlas is scaled from, and the matrix a glyph is asked for is four sixteen point sixteen longs
--- rather than something shorter -- nothing about the wrong size of it is refused loudly, and every
--- glyph in the font comes back as an error that reads like the glyph or the buffer being at fault.
+-- Uses Uniscribe and DirectWrite to shape and rasterize text for Windows.
+-- DirectWrite is used if it's available, GDI otherwise.
+
 local ffi = require("ffi")
 local sfnt = require("texter-common").sfnt
 local utf8 = require("texter-common").utf8
@@ -303,20 +285,7 @@ local gdi = ffi.load("gdi32")
 local kernel = ffi.load("kernel32")
 local usp = ffi.load("usp10")
 
--- What DirectWrite is reached through where the machine has the version that draws a glyph at a
--- fraction of a pixel: one factory for the process, and one GDI interop from it, through which a
--- font GDI already has -- from a file the system was given, or from bytes an app brought -- becomes
--- a DirectWrite font face.
---
--- It is made once, when this module is loaded, rather than on the first glyph drawn: whether it is
--- there is what `subpixel` says, and a caller is told that before it asks for a glyph. A factory
--- before 8.1 is a factory without the glyph run analysis that takes a text antialias mode, and what
--- this asks for is the 8.1 interface; where the interface is not there, or the library is not,
--- every glyph is drawn by GDI below, which ignores the fraction.
---
--- The library is kept with the objects made from it: a library LuaJIT loads is closed when the
--- object that loaded it is collected, and every pointer below is into the code and tables of that
--- library -- a factory whose library was closed is a table of addresses of nothing.
+-- The DirectWrite library and the factory and interop it made, if any
 local direct = { library = nil, factory = nil, interop = nil }
 
 -- Where a call writes the object it made, kept for as long as the module is: a pointer read out of
