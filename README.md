@@ -1,4 +1,4 @@
-# texter
+# texter [![Test](https://github.com/bycruz/texter/actions/workflows/test.yml/badge.svg)](https://github.com/bycruz/texter/actions/workflows/test.yml)
 
 Text shaping and glyphs from what the machine already has.
 

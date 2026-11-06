@@ -15,6 +15,12 @@ local FONTS = {
 	"/Library/Fonts/Arial.ttf",
 	"C:/Windows/Fonts/arial.ttf",
 }
+-- Termux installs its fonts under the prefix rather than /usr/share.
+local PREFIX = os.getenv("PREFIX")
+if PREFIX then
+	FONTS[#FONTS + 1] = PREFIX .. "/share/fonts/TTF/DejaVuSans.ttf"
+end
+
 
 ---@return string? path
 local function aFont()

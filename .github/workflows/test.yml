@@ -1,0 +1,100 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+          - os: ubuntu-24.04-arm
+          - os: ubuntu-24.04-arm
+            android: true
+          - os: windows-latest
+          - os: windows-11-arm
+          - os: macos-15
+          - os: macos-15-intel
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # Ubuntu 24.04 has the FreeType that paints a COLR v1 graph; the 22.04
+      # package cannot, which skips or fails those tests.
+      - name: Install text libraries and fonts (Linux)
+        if: runner.os == 'Linux' && !matrix.android
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            curl ca-certificates \
+            libfreetype6 libharfbuzz0b libfribidi0 \
+            fonts-dejavu-core fonts-noto-core fonts-noto-color-emoji
+
+          # Fedora names the colour emoji font after its post-CBDT format. The
+          # tests ask for that file first because it is the one with advances.
+          sudo mkdir -p /usr/share/fonts/google-noto-color-emoji-fonts
+          sudo curl -fL -o /usr/share/fonts/google-noto-color-emoji-fonts/Noto-COLRv1.ttf \
+            https://raw.githubusercontent.com/googlefonts/noto-emoji/99701e07d3d1fe1bdbcdb14964547f0fd592966f/2D/fonts/Noto-COLRv1.ttf
+
+      - name: Setup lde
+        uses: lde-org/setup-lde@master
+        with:
+          version: nightly
+          platform: ${{ matrix.android && 'Android' || '' }}
+
+      - name: Run tests
+        if: "!matrix.android"
+        run: lde test
+
+      - name: Run shapes example
+        if: "!matrix.android"
+        run: lde run -C examples/shapes
+
+      # The Android lde binary cannot run on the Ubuntu runner; it runs inside
+      # the Termux image. The image carries the native text libraries and a
+      # font, which the tests locate through $PREFIX.
+      - name: Fix workspace permissions (Android)
+        if: matrix.android
+        run: |
+          chmod -R a+rw ${{ github.workspace }}
+          cp ~/.lde/lde ${{ github.workspace }}/lde
+
+      - name: Cache Termux image (Android)
+        if: matrix.android
+        id: cache-android-image
+        uses: actions/cache@v5
+        with:
+          path: /tmp/termux-android.tar
+          key: termux-android-v6
+
+      - name: Build Termux image (Android)
+        if: matrix.android && steps.cache-android-image.outputs.cache-hit != 'true'
+        run: |
+          docker run --privileged --platform linux/arm64 \
+            --name termux-build termux/termux-docker:aarch64 \
+            bash -c "apt update && apt install -y git clang cmake ninja openssl freetype harfbuzz fribidi ttf-dejavu"
+          docker commit termux-build termux-android:latest
+          docker rm termux-build
+          docker save termux-android:latest -o /tmp/termux-android.tar
+
+      - name: Load Termux image (Android)
+        if: matrix.android
+        run: docker load -i /tmp/termux-android.tar
+
+      - name: Run tests (Android)
+        if: matrix.android
+        run: |
+          docker run --rm --privileged --platform linux/arm64 \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            termux-android:latest \
+            bash -c "/workspace/lde test"

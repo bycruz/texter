@@ -20,6 +20,12 @@ local FONTS = {
 	"C:/Windows/Fonts/arial.ttf",
 	"C:/Windows/Fonts/segoeui.ttf",
 }
+-- Termux installs its fonts under the prefix rather than /usr/share.
+local PREFIX = os.getenv("PREFIX")
+if PREFIX then
+	FONTS[#FONTS + 1] = PREFIX .. "/share/fonts/TTF/DejaVuSans.ttf"
+end
+
 
 -- Lines that ask different things of a shaper: letters that join within a word, letters that kern
 -- and ligate, a line of two directions, a line of characters outside latin, and one that is empty.

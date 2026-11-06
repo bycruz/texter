@@ -15,6 +15,11 @@ local LATIN = {
 	"/Library/Fonts/Arial.ttf",
 	"C:/Windows/Fonts/arial.ttf",
 }
+-- Termux installs its fonts under the prefix rather than /usr/share.
+local PREFIX = os.getenv("PREFIX")
+if PREFIX then
+	LATIN[#LATIN + 1] = PREFIX .. "/share/fonts/TTF/DejaVuSans.ttf"
+end
 
 local ARABIC = {
 	"/usr/share/fonts/google-noto-vf/NotoSansArabic[wght].ttf",
@@ -400,7 +405,7 @@ test.skipIf(emojiFace == nil)("shapes a sequence of emoji joined by a zero width
 	test.equal(texter.penOf(line, #text + 1), line.width, "and the end of it is the end of the line")
 end)
 
-test.skipIf(colourPath == nil)("gives the colours of a glyph a font draws in layers", function()
+test.skipIf(not texter.available() or colourPath == nil)("gives the colours of a glyph a font draws in layers", function()
 	local face = assert(texter.face(assert(colourPath), 0))
 	local ink = face:ink(0x41, 24)
 
@@ -424,7 +429,7 @@ test.skipIf(colourPath == nil)("gives the colours of a glyph a font draws in lay
 	test.truthy(seen.blue, "and the dot on it is blue")
 end)
 
-test.skipIf(colourPath == nil)("draws a glyph a font has an outline of as coverage rather than colour", function()
+test.skipIf(not texter.available() or colourPath == nil)("draws a glyph a font has an outline of as coverage rather than colour", function()
 	local face = assert(texter.face(assert(colourPath), 0))
 
 	-- The same font has a glyph with no layers at all -- the dot alone -- and what a glyph with no
@@ -518,7 +523,7 @@ local function pixelOf(ink, row, column)
 	return pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]
 end
 
-test.skipIf(graphPath == nil)("paints a glyph a font draws as a graph of shapes and colours", function()
+test.skipIf(not texter.available() or graphPath == nil)("paints a glyph a font draws as a graph of shapes and colours", function()
 	local face = assert(texter.face(assert(graphPath), 0))
 	local ink = face:ink(0x41, 32)
 
@@ -536,7 +541,7 @@ test.skipIf(graphPath == nil)("paints a glyph a font draws as a graph of shapes 
 	test.equal(alpha, 255, "and it is opaque where it is drawn")
 end)
 
-test.skipIf(graphPath == nil)("paints a gradient from one stop to the other", function()
+test.skipIf(not texter.available() or graphPath == nil)("paints a gradient from one stop to the other", function()
 	local face = assert(texter.face(assert(graphPath), 0))
 	local ink = face:ink(0x42, 32)
 	local row = math.floor(ink.height / 2)
@@ -553,7 +558,7 @@ test.skipIf(graphPath == nil)("paints a gradient from one stop to the other", fu
 	test.truthy(rightBlue > rightRed + 100, "and the end of it is the colour it ends in")
 end)
 
-test.skipIf(graphPath == nil)("puts a picture over another where the graph says to", function()
+test.skipIf(not texter.available() or graphPath == nil)("puts a picture over another where the graph says to", function()
 	local face = assert(texter.face(assert(graphPath), 0))
 
 	--- How many pixels of a picture are drawn in the second colour of the palette.
@@ -582,7 +587,7 @@ test.skipIf(graphPath == nil)("puts a picture over another where the graph says 
 	test.greater(bluePixels(composited), 20, "which is the dot the graph puts on it")
 end)
 
-test.skipIf(graphPath == nil)("draws a shape where the graph moves it to", function()
+test.skipIf(not texter.available() or graphPath == nil)("draws a shape where the graph moves it to", function()
 	local face = assert(texter.face(assert(graphPath), 0))
 
 	-- What a glyph comes to is the face's own buffer, which the next glyph is written into: one is
@@ -604,7 +609,7 @@ test.skipIf(graphPath == nil)("draws a shape where the graph moves it to", funct
 	test.equal(moved.width, inPlaceWidth, "in a picture of the same size")
 end)
 
-test.skipIf(graphPath == nil)("paints a picture the graph refers to rather than one of its own", function()
+test.skipIf(not texter.available() or graphPath == nil)("paints a picture the graph refers to rather than one of its own", function()
 	local face = assert(texter.face(assert(graphPath), 0))
 	local own = face:ink(0x41, 32)
 	local row = math.floor(own.height / 2)
@@ -619,7 +624,7 @@ test.skipIf(graphPath == nil)("paints a picture the graph refers to rather than 
 	test.equal(referredLast, ownLast)
 end)
 
-test.skipIf(colrv1Path == nil)("paints an emoji out of the graph its font keeps", function()
+test.skipIf(not texter.available() or colrv1Path == nil)("paints an emoji out of the graph its font keeps", function()
 	local face = assert(texter.face(assert(colrv1Path), 0))
 	local ink = face:ink(0x2705, 24)
 
