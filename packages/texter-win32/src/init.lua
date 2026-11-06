@@ -147,6 +147,14 @@ local CLIP_DEFAULT_PRECIS = 0
 local ANTIALIASED_QUALITY = 4
 local FF_DONTCARE = 0
 
+-- The character height a line is *placed* at, whatever height it is drawn at. GDI hints a font to
+-- the pixel grid, and what Uniscribe places a line with at a small size is each glyph's advance
+-- rounded to whole pixels, nearly always up: a word of Inter at fifteen pixels comes to two pixels
+-- wider than the font says, spread one glyph at a time, which reads as "F ugazi". At this height
+-- the rounding is a few thousandths of a pixel once scaled down, which is the font's own spacing --
+-- the fractions FreeType and CoreText answer with -- while the ink is still drawn at the size asked.
+local DESIGN_HEIGHT = 2048
+
 local gdi = ffi.load("gdi32")
 local kernel = ffi.load("kernel32")
 local usp = ffi.load("usp10")
@@ -170,6 +178,9 @@ local win32 = {}
 ---@field stack ffi.cdata* # Where a glyph's ink is copied, kept
 ---@field room number # How many pixels that stack holds, grown as glyphs need
 ---@field cache ffi.cdata* # The SCRIPT_CACHE of the font this face has selected, given back when it changes
+---@field design HANDLE? # The same font at the height lines are placed at: see `DESIGN_HEIGHT`
+---@field designCache ffi.cdata* # The SCRIPT_CACHE of that one
+---@field designScale number # What a distance at that height is at the height asked for
 ---@field distant table<number, number> # What a character outside the basic plane came to, kept
 local Face = {}
 
@@ -332,6 +343,9 @@ local function fromFamily(family, path, index, memory, data, buffer)
 		stack = ffi.new("unsigned char[?]", 1 << 16),
 		room = 1 << 16,
 		cache = ffi.new("SCRIPT_CACHE[1]"),
+		design = nil,
+		designCache = ffi.new("SCRIPT_CACHE[1]"),
+		designScale = 1,
 		distant = {},
 	}, { __index = Face })
 
@@ -497,7 +511,19 @@ function Face:size(pixelHeight)
 		gdi.DeleteObject(self.font)
 	end
 
+	-- The font lines are placed with, at a height its hinting no longer moves anything: made, then
+	-- the font drawn with selected again, and the one it replaces given back once nothing has it.
+	local designHeight = math.max(chosen, DESIGN_HEIGHT)
+	local design = self:make(designHeight)
+
+	gdi.SelectObject(self.context, made)
+
+	if self.design ~= nil then
+		gdi.DeleteObject(self.design)
+	end
+
 	self.font, self.height = made, pixelHeight
+	self.design, self.designScale = design, chosen / designHeight
 end
 
 --- What Uniscribe has kept of the font this face had selected, given back.
@@ -514,12 +540,12 @@ end
 --- font change, and what a screen pays once for each time it moves from one size to another.
 ---@param self texter.win32.Face
 function Face:forget()
-	local cache = self.cache
+	for _, cache in ipairs({ self.cache, self.designCache }) do
+		if cache ~= nil and cache[0] ~= nil then
+			usp.ScriptFreeCache(cache)
 
-	if cache ~= nil and cache[0] ~= nil then
-		usp.ScriptFreeCache(cache)
-
-		cache[0] = nil
+			cache[0] = nil
+		end
 	end
 end
 
@@ -588,9 +614,12 @@ function Face:advance(codepoint, pixelHeight)
 
 	local sizes = ffi.new("ABC[1]")
 
+	-- Measured in the font lines are placed with, for the same reason a line is: see `DESIGN_HEIGHT`.
+	gdi.SelectObject(self.context, self.design)
 	gdi.GetCharABCWidthsW(self.context, codepoint, codepoint, sizes)
+	gdi.SelectObject(self.context, self.font)
 
-	return tonumber(sizes[0].abcA + sizes[0].abcB + sizes[0].abcC)
+	return tonumber(sizes[0].abcA + sizes[0].abcB + sizes[0].abcC) * self.designScale
 end
 
 ---@param glyph number
@@ -739,8 +768,19 @@ function win32.shape(face, text, pixelHeight, _opts)
 
 			local abc = ffi.new("ABC[1]")
 
-			assert(usp.ScriptPlace(face.context, cache, out, shaped[0], attributes, analysis, advances, offsets, abc) == 0,
-				"Uniscribe could not place a run of " .. text)
+			-- Placed in the font at the height lines are placed at, and scaled to the height asked for:
+			-- the glyphs a run is shaped into are the same at every size, and their advances at the
+			-- size drawn are rounded to whole pixels. See `DESIGN_HEIGHT`.
+			gdi.SelectObject(face.context, face.design)
+
+			local placed = usp.ScriptPlace(face.context, assert(face.designCache), out, shaped[0], attributes, analysis,
+				advances, offsets, abc)
+
+			gdi.SelectObject(face.context, face.font)
+
+			assert(placed == 0, "Uniscribe could not place a run of " .. text)
+
+			local scale = face.designScale
 
 			if rtl and logical then
 				-- What Uniscribe shapes into is the order the glyphs are drawn in, from the left, which
@@ -750,20 +790,20 @@ function win32.shape(face, text, pixelHeight, _opts)
 				local total = 0
 
 				for step = 0, shaped[0] - 1 do
-					total = total + advances[step]
+					total = total + advances[step] * scale
 				end
 
 				local trailing = total
 
 				for step = shaped[0] - 1, 0, -1 do
-					trailing = trailing - advances[step]
+					trailing = trailing - advances[step] * scale
 
 					glyphs[#glyphs + 1] = {
 						glyph = out[step],
 						cluster = byteOf(clusters[step] + at),
-						x = x + trailing + offsets[step].du,
-						y = -offsets[step].dv,
-						advance = advances[step],
+						x = x + trailing + offsets[step].du * scale,
+						y = -offsets[step].dv * scale,
+						advance = advances[step] * scale,
 					}
 				end
 
@@ -773,12 +813,12 @@ function win32.shape(face, text, pixelHeight, _opts)
 					glyphs[#glyphs + 1] = {
 						glyph = out[step],
 						cluster = byteOf(clusters[step] + at),
-						x = x + offsets[step].du,
-						y = -offsets[step].dv,
-						advance = advances[step],
+						x = x + offsets[step].du * scale,
+						y = -offsets[step].dv * scale,
+						advance = advances[step] * scale,
 					}
 
-					x = x + advances[step]
+					x = x + advances[step] * scale
 				end
 			end
 		end

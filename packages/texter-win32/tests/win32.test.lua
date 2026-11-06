@@ -138,6 +138,24 @@ test.skipIf(not ok or fontPath == nil)("shapes a line at the size it is asked fo
 	test.greater(after.width, small.width * 2, "and a size three times another is more than twice as wide")
 end)
 
+test.skipIf(not ok or fontPath == nil)("spaces a small line the way the font does, not to whole pixels", function()
+	-- GDI hints a font to the pixel grid, and what a line was placed with at a small size was each
+	-- advance rounded to whole pixels, nearly always up: Arial's "Minimalissimo" came to 81 pixels at
+	-- fifteen where the font says 75, a glyph at a time, which is letters standing apart. The same line
+	-- at a size where that rounding is nothing, scaled to the character height the small one was made
+	-- at, is how wide the font says it is.
+	local small = assert(win32.face(assert(fontPath), 0))
+	local large = assert(win32.face(assert(fontPath), 0))
+
+	for _, word in ipairs({ "Fugazi", "songs", "Minimalissimo", "illicit" }) do
+		local line = win32.shape(small, word, 15)
+		local expected = win32.shape(large, word, 1500).width * small.designScale / large.designScale
+
+		test.truthy(math.abs(line.width - expected) < 0.25,
+			string.format("%s is %.2f wide at fifteen pixels, and the font says %.2f", word, line.width, expected))
+	end
+end)
+
 test.skipIf(not ok or fontPath == nil)("puts a caret where a byte of the line is", function()
 	local face = assert(win32.face(assert(fontPath), 0))
 	local line = win32.shape(face, "Hello", 24)
