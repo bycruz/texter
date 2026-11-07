@@ -9,12 +9,12 @@
 --
 -- The tables are found through the offsets in the file's own directory, and everything a file that
 -- is not a font would make nonsense of is checked rather than trusted.
+---@class texter.common.sfnt
 local sfnt = {}
 
 --- The four bytes at an offset, as the tag they spell.
 ---@param content string
 ---@param at number # From one
----@return string
 local function tagAt(content, at)
 	return content:sub(at, at + 3)
 end
@@ -22,17 +22,15 @@ end
 --- A whole number of two bytes, big endian.
 ---@param content string
 ---@param at number
----@return number
 local function u16(content, at)
 	local high, low = content:byte(at, at + 1)
 
-	return (high or 0) * 256 + (low or 0)
+	return ((high or 0) << 8) | (low or 0)
 end
 
 --- A whole number of four bytes, big endian.
 ---@param content string
 ---@param at number
----@return number
 local function u32(content, at)
 	local a, b, c, d = content:byte(at, at + 3)
 
@@ -42,7 +40,6 @@ end
 --- The offset of a table, or nought where the font has none of that name.
 ---@param content string
 ---@param wanted string
----@return number? at
 local function tableAt(content, wanted)
 	if #content < 12 then
 		return nil
@@ -75,7 +72,6 @@ end
 
 --- A string of UTF-16 big endian as UTF-8, which is what a Windows name record holds.
 ---@param content string
----@return string
 local function utf16ToUtf8(content)
 	local out = {}
 
@@ -116,7 +112,7 @@ function sfnt.family(content)
 	-- Where the strings a record points into start, which is an offset the table states rather than
 	-- where its records happen to end.
 	local strings = names + u16(content, names + 4)
-	local family, subfamily = nil, nil
+	local family = nil
 
 	for index = 0, math.min(count, 512) - 1 do
 		local record = names + 6 + index * 12
@@ -134,13 +130,9 @@ function sfnt.family(content)
 				family = utf16ToUtf8(content:sub(at, at + length - 1))
 			elseif platform == 3 and identifier == 1 and family == nil then
 				family = utf16ToUtf8(content:sub(at, at + length - 1))
-			elseif platform == 3 and identifier == 17 and subfamily == nil then
-				subfamily = utf16ToUtf8(content:sub(at, at + length - 1))
 			end
 		end
 	end
-
-	_ = subfamily
 
 	return family
 end

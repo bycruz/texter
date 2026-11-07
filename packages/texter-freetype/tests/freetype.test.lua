@@ -87,7 +87,6 @@ local colrv1Path = present(COLRV1)
 
 --- A face of a font that draws emoji at all, which is what the emoji tests are about: a machine
 --- whose fonts have none of them skips rather than fails.
----@return texter.freetype.Face? face
 local function anEmojiFace()
 	if not texter.available() then
 		return nil
@@ -101,8 +100,12 @@ local function anEmojiFace()
 
 			local made, face = pcall(texter.face, path, 0)
 
-			if made and face and face:hasGlyph(0x1F600) and face:hasGlyph(0x1F680) then
-				return face
+			if made and face then
+				---@cast face texter.freetype.Face
+
+				if face:hasGlyph(0x1F600) and face:hasGlyph(0x1F680) then
+					return face
+				end
 			end
 		end
 	end
@@ -155,7 +158,7 @@ local function rowInk(ink, row)
 	local sum = 0
 
 	for column = 0, ink.width - 1 do
-		sum = sum + assert(ink.pixels)[row * ink.width + column]
+		sum += assert(ink.pixels)[row * ink.width + column]
 	end
 
 	return sum
@@ -190,7 +193,7 @@ test.skipIf(not texter.available() or latinPath == nil)("shapes a line into the 
 		test.truthy(glyph.cluster >= 0 and glyph.cluster < #line.text, "and came from a byte of the line")
 		test.greater(glyph.glyph, 0, "and is a glyph of the font")
 
-		pen = pen + glyph.advance
+		pen += glyph.advance
 	end
 
 	test.equal(line.width, pen, "and the line is as wide as its glyphs put together")
@@ -231,7 +234,7 @@ test.skipIf(not texter.available() or latinPath == nil)("puts a caret where a by
 		test.equal(at, pen, "the caret is where the glyph that byte came from is drawn")
 		test.equal(texter.byteAt(line, at), glyph.cluster, "and a point there is that byte again")
 
-		pen = pen + glyph.advance
+		pen += glyph.advance
 
 		_ = index
 	end
@@ -293,7 +296,7 @@ test.skipIf(not texter.available() or arabicPath == nil or latinPath == nil)(
 
 		for _, run in ipairs(mixed.runs) do
 			test.truthy(run.last >= run.first, "every run is a stretch of the line")
-			seen = seen + 1
+			seen += 1
 		end
 
 		test.equal(seen, #mixed.runs)
@@ -338,7 +341,7 @@ test.skipIf(not texter.available() or latinPath == nil)("draws a glyph the right
 end)
 
 test.skipIf(emojiFace == nil)("draws an emoji, which is a character outside the basic plane", function()
-	local face = assert(emojiFace)
+	local face = assert(emojiFace) ---@cast face texter.freetype.Face
 
 	test.truthy(face:hasGlyph(0x1F600), "it says it draws a grinning face, which is two UTF-16 units")
 
@@ -351,7 +354,7 @@ test.skipIf(emojiFace == nil)("draws an emoji, which is a character outside the 
 end)
 
 test.skipIf(emojiFace == nil)("counts an emoji in bytes of the line, which is four of them", function()
-	local face = assert(emojiFace)
+	local face = assert(emojiFace) ---@cast face texter.freetype.Face
 	local line = texter.shape(face, "😀😀", 24)
 	local at = starts("😀😀")
 
@@ -365,14 +368,14 @@ test.skipIf(emojiFace == nil)("counts an emoji in bytes of the line, which is fo
 	local pen = 0.0
 
 	for _, glyph in ipairs(line.glyphs) do
-		pen = pen + glyph.advance
+		pen += glyph.advance
 	end
 
 	test.truthy(math.abs(line.width - pen) < 1.5, "and the line is as wide as its glyphs put together")
 end)
 
 test.skipIf(emojiFace == nil)("puts a caret between two emoji rather than inside one", function()
-	local face = assert(emojiFace)
+	local face = assert(emojiFace) ---@cast face texter.freetype.Face
 	local line = texter.shape(face, "😀😀", 24)
 	local first = texter.penOf(line, 0)
 	local second = texter.penOf(line, 4)
@@ -389,7 +392,7 @@ test.skipIf(emojiFace == nil)("puts a caret between two emoji rather than inside
 end)
 
 test.skipIf(emojiFace == nil)("shapes a sequence of emoji joined by a zero width joiner", function()
-	local face = assert(emojiFace)
+	local face = assert(emojiFace) ---@cast face texter.freetype.Face
 	local text = "👩‍🚀"
 	local line = texter.shape(face, text, 24)
 	local at = starts(text)
@@ -419,8 +422,8 @@ test.skipIf(not texter.available() or colourPath == nil)("gives the colours of a
 		local blue, _, red, alpha = pixels[at * 4], pixels[at * 4 + 1], pixels[at * 4 + 2], pixels[at * 4 + 3]
 
 		if alpha > 200 then
-			bright = bright + 1
-			seen[red > 200 and "red" or (blue > 200 and "blue" or "between")] = true
+			bright += 1
+			seen[red > 200 ? "red" : (blue > 200 ? "blue" : "between")] = true
 		end
 	end
 
@@ -447,7 +450,6 @@ test.it("reads a bitmap a pixel at a time, whatever the pixels are", function()
 	--- A buffer of bytes, filled the plain way: an array of characters whose length is written out
 	--- with the bytes beside it is a shape this LuaJIT gets wrong where another allocation is big.
 	---@param bytes string
-	---@return ffi.cdata*
 	local function buffer(bytes)
 		local out = ffi.new("unsigned char[?]", #bytes)
 
@@ -563,14 +565,13 @@ test.skipIf(not texter.available() or graphPath == nil)("puts a picture over ano
 
 	--- How many pixels of a picture are drawn in the second colour of the palette.
 	---@param ink texter.Ink
-	---@return number
 	local function bluePixels(ink)
 		local pixels = assert(ink.pixels)
 		local count = 0
 
 		for at = 0, ink.width * ink.height - 1 do
 			if pixels[at * 4] > 200 and pixels[at * 4 + 2] < 40 and pixels[at * 4 + 3] > 200 then
-				count = count + 1
+				count += 1
 			end
 		end
 
@@ -638,7 +639,7 @@ test.skipIf(not texter.available() or colrv1Path == nil)("paints an emoji out of
 
 	for at = 0, ink.width * ink.height - 1 do
 		if pixels[at * 4 + 3] > 200 then
-			drawn = drawn + 1
+			drawn += 1
 		end
 	end
 

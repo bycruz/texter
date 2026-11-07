@@ -26,6 +26,7 @@
 -- caller that wants to keep what it read.
 local ffi = require("ffi")
 
+---@class texter.common.utf8
 local utf8 = {}
 
 --- One character of a string, and where the one after it starts.
@@ -71,28 +72,37 @@ end
 
 --- The characters of a string, and the byte each of them starts at.
 ---@class texter.Characters
----@field codepoints ffi.cdata* # uint32_t[]: the characters, from nought
----@field offsets ffi.cdata* # uint32_t[]: the byte each starts at, from one
+---@field codepoints ffi.array<ffi.uint32_t> # uint32_t[]: the characters, from nought
+---@field offsets ffi.array<ffi.uint32_t> # uint32_t[]: the byte each starts at, from one
 ---@field count number
 
 --- The UTF-16 units of a string, and the byte each of them starts at.
 ---@class texter.Units
----@field units ffi.cdata* # uint16_t[]: the units, from nought
----@field offsets ffi.cdata* # uint32_t[]: the byte each starts at, from one
+---@field units ffi.array<ffi.uint16_t> # uint16_t[]: the units, from nought
+---@field offsets ffi.array<ffi.uint32_t> # uint32_t[]: the byte each starts at, from one
 ---@field count number
 
 --- The longest string these buffers have been grown for, which is as many characters or units as a
 --- string of that many bytes can have.
 local room = 0
 
----@type ffi.cdata*
-local codepoints, characterOffsets, units, unitOffsets = nil, nil, nil, nil
+---@type ffi.array<ffi.uint32_t>
+local codepoints = ffi.new("uint32_t[0]")
+
+---@type ffi.array<ffi.uint32_t>
+local characterOffsets = ffi.new("uint32_t[0]")
+
+---@type ffi.array<ffi.uint16_t>
+local units = ffi.new("uint16_t[0]")
+
+---@type ffi.array<ffi.uint32_t>
+local unitOffsets = ffi.new("uint32_t[0]")
 
 ---@type texter.Characters
-local characters = { codepoints = nil, offsets = nil, count = 0 }
+local characters = { codepoints = codepoints, offsets = characterOffsets, count = 0 }
 
 ---@type texter.Units
-local wide = { units = nil, offsets = nil, count = 0 }
+local wide = { units = units, offsets = unitOffsets, count = 0 }
 
 --- Grows what is kept to hold a string of this many bytes.
 ---@param bytes number
@@ -127,7 +137,7 @@ function utf8.characters(text)
 
 		codepoints[count] = codepoint
 		characterOffsets[count] = at
-		count = count + 1
+		count += 1
 		at = after
 	end
 
@@ -157,16 +167,16 @@ function utf8.units(text)
 		if codepoint < 0x10000 then
 			units[count] = codepoint
 			unitOffsets[count] = at
-			count = count + 1
+			count += 1
 		else
 			local point = codepoint - 0x10000
 
 			units[count] = 0xD800 + math.floor(point / 0x400)
 			unitOffsets[count] = at
-			count = count + 1
+			count += 1
 			units[count] = 0xDC00 + point % 0x400
 			unitOffsets[count] = at
-			count = count + 1
+			count += 1
 		end
 
 		at = after

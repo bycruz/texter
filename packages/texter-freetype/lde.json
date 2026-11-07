@@ -10,5 +10,10 @@
 		"texter-common": {
 			"path": "../texter-common"
 		}
+	},
+	"devDependencies": {
+		"lde-test": {
+			"git": "https://github.com/lde-org/lde"
+		}
 	}
 }

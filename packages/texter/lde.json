@@ -14,5 +14,10 @@
 		"android": ["texter-freetype"],
 		"windows": ["texter-win32"],
 		"macos": ["texter-coretext"]
+	},
+	"devDependencies": {
+		"lde-test": {
+			"git": "https://github.com/lde-org/lde"
+		}
 	}
 }

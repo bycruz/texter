@@ -52,8 +52,12 @@ local function anEmojiFace()
 
 			local made, face = pcall(texter.face, path, 0)
 
-			if made and face and face:hasGlyph(0x1F600) then
-				return face
+			if made and face then
+				---@cast face texter.Face
+
+				if face:hasGlyph(0x1F600) then
+					return face
+				end
 			end
 		end
 	end
@@ -99,8 +103,10 @@ test.skipIf(not texter.available() or fontPath == nil)("asks for a glyph at a fr
 
 	test.greater(ink.width, 0, "the glyph has ink at half a pixel")
 
-	if texter.backend.subpixel then
-		test.equal(texter.provider.subpixel, true, "and the provider says it draws at a fraction of one")
+	local backend = assert(texter.backend)
+
+	if backend.subpixel then
+		test.equal(assert(texter.provider).subpixel, true, "and the provider says it draws at a fraction of one")
 	end
 end)
 
@@ -130,9 +136,10 @@ end)
 
 test.it("hands out the reader a UI library asks for, where this machine can read a font at all", function()
 	if texter.available() then
-		test.truthy(texter.provider ~= nil, "a machine with text has something that reads a font")
-		test.truthy(type(texter.provider.open) == "function", "which is opened by a path")
-		test.truthy(type(texter.provider.openBytes) == "function", "or by the bytes of a font")
+		local provider = assert(texter.provider)
+
+		test.truthy(type(provider.open) == "function", "which is opened by a path")
+		test.truthy(type(provider.openBytes) == "function", "or by the bytes of a font")
 	else
 		test.equal(texter.provider, nil, "and a machine without it has nothing to hand over")
 	end

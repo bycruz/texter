@@ -133,8 +133,10 @@ ffi.cdef [[
 	typedef struct IDWriteGdiInterop IDWriteGdiInterop;
 	typedef struct IDWriteFontFace IDWriteFontFace;
 	typedef struct IDWriteGlyphRunAnalysis IDWriteGlyphRunAnalysis;
+	typedef struct IDWriteColorGlyphRunEnumerator IDWriteColorGlyphRunEnumerator;
 
 	typedef struct { float m11, m12, m21, m22, dx, dy; } DWRITE_MATRIX;
+	typedef struct { float r, g, b, a; } DWRITE_COLOR_F;
 	typedef struct { float advanceOffset, ascenderOffset; } DWRITE_GLYPH_OFFSET;
 
 	// One run of glyphs: what a glyph's bitmap is asked for. The advances are the pen's and not the
@@ -150,6 +152,28 @@ ffi.cdef [[
 		BOOL isSideways;
 		UINT32 bidiLevel;
 	} DWRITE_GLYPH_RUN;
+
+	// One layer of a colour glyph: the run that draws it, where its baseline sits, and what colour
+	// it is painted in. Colour fonts are pictures made of shapes -- an emoji is a stack of them --
+	// and DirectWrite hands the stack back in back to front order, which is the order it is drawn in.
+	typedef struct {
+		DWRITE_GLYPH_RUN glyphRun;
+		void *glyphRunDescription;
+		float baselineOriginX;
+		float baselineOriginY;
+		DWRITE_COLOR_F runColor;
+		unsigned short paletteIndex;
+	} DWRITE_COLOR_GLYPH_RUN;
+
+	typedef struct {
+		void *QueryInterface; // 0
+		void *AddRef;         // 1
+		ULONG (*Release)(IDWriteColorGlyphRunEnumerator *); // 2
+		HRESULT (*MoveNext)(IDWriteColorGlyphRunEnumerator *, BOOL *); // 3
+		HRESULT (*GetCurrentRun)(IDWriteColorGlyphRunEnumerator *, const DWRITE_COLOR_GLYPH_RUN **); // 4
+	} IDWriteColorGlyphRunEnumeratorVtbl;
+
+	struct IDWriteColorGlyphRunEnumerator { const IDWriteColorGlyphRunEnumeratorVtbl *vtbl; };
 
 	typedef struct {
 		void *QueryInterface; // 0
@@ -183,7 +207,9 @@ ffi.cdef [[
 		// IDWriteFactory2
 		void *GetSystemFontFallback;      // 26
 		void *CreateFontFallbackBuilder;  // 27
-		void *TranslateColorGlyphRun;     // 28
+		HRESULT (*TranslateColorGlyphRun)(IDWriteFactory2 *, float, float, const DWRITE_GLYPH_RUN *,
+			const void *, int, const DWRITE_MATRIX *, UINT32,
+			IDWriteColorGlyphRunEnumerator **); // 28
 		void *CreateCustomRenderingParams2; // 29
 		// The other call this file makes: a glyph's coverage as grayscale of its own, at a place on
 		// the baseline that may be a fraction of a pixel. Only a factory of 8.1 or later has it.
@@ -290,6 +316,12 @@ local kernel = ffi.load("kernel32")
 local usp = ffi.load("usp10")
 
 -- The DirectWrite library and the factory and interop it made, if any
+---@class texter.win32.Direct
+---@field library ffi.namespace*?
+---@field factory ffi.ptr<IDWriteFactory2>?
+---@field interop ffi.ptr<IDWriteGdiInterop>?
+
+---@type texter.win32.Direct
 local direct = { library = nil, factory = nil, interop = nil }
 
 -- Where a call writes the object it made, kept for as long as the module is: a pointer read out of
@@ -301,6 +333,8 @@ do
 	local isLoaded, library = pcall(ffi.load, "dwrite")
 
 	if isLoaded then
+		---@cast library ffi.namespace*
+
 		-- IID_IDWriteFactory2, as `dwrite_2.h` spells it: 0439fc60-ca44-4994-8dee-3a9af7b732ec.
 		local iid = ffi.new("TEXTER_IID")
 
@@ -315,9 +349,15 @@ do
 		end)
 
 		if isCalled and result == 0 then
-			direct.library, direct.factory = library, ffi.cast("IDWriteFactory2 *", madeFactory[0])
+			local factory = ffi.cast("IDWriteFactory2 *", madeFactory[0])
 
-			if direct.factory.vtbl.GetGdiInterop(direct.factory, madeInterop) ~= 0 then
+			direct.library, direct.factory = library, factory
+
+			local vtbl = assert(factory.vtbl)
+
+			local getGdiInterop = assert(vtbl.GetGdiInterop)
+
+			if getGdiInterop(factory, madeInterop) ~= 0 then
 				direct.factory = nil
 			else
 				direct.interop = madeInterop[0]
@@ -328,27 +368,44 @@ end
 
 -- What GDI is handed is a family, and a file is what an app has: the family is read out of the
 -- file's own name table, which is `texter-common`'s because every platform needs the same thing.
----@class texter.win32.Face
+---@class texter.win32
+---@field available fun(): boolean
+---@field why fun(): string?
+---@field face fun(path: string, index: number?): texter.win32.Face?, string?
+---@field faceBytes fun(content: string, index: number?): texter.win32.Face?, string?
+---@field shape fun(face: texter.win32.Face, text: string, pixelHeight: number, opts: texter.ShapeOpts?): texter.Line
+---@field ink fun(face: texter.win32.Face, glyph: number, pixelHeight: number, opts: texter.InkOpts?): texter.Ink
+---@field metrics fun(face: texter.win32.Face, pixelHeight: number): number, number, number
+---@field penOf fun(line: texter.Line, byte: number): number
+---@field byteAt fun(line: texter.Line, x: number): number
+---@field provider texter.Provider
+---@field subpixel boolean
 
 local win32 = {}
 
----@class texter.win32.Face
+---@class texter.win32.LayerInk: texter.Ink
+---@field r number
+---@field g number
+---@field b number
+---@field a number
+
+---@class texter.win32.Face: texter.Face
 ---@field path string
 ---@field index number
 ---@field family string
 ---@field data string? # The font's bytes, where it was registered from memory rather than from `path`
----@field buffer ffi.cdata*? # Those bytes where the system reads them, kept for as long as the face
+---@field buffer ffi.array<ffi.uint8_t>? # Those bytes where the system reads them, kept for as long as the face
 ---@field memory HANDLE? # What AddFontMemResourceEx answered, kept for as long as the face
 ---@field context HDC # A device context with the font selected into it, kept
----@field font HANDLE
+---@field font HANDLE? # The font the face is set at, made by `size`
 ---@field height number
 ---@field em number # The character height the font selected now was made at: what DirectWrite draws a glyph at
----@field direct ffi.cdata*|false? # The IDWriteFontFace of this family, made once; false where there is none to make
----@field stack ffi.cdata* # Where a glyph's ink is copied, kept
+---@field direct ffi.ptr<IDWriteFontFace>|false? # The IDWriteFontFace of this family, made once; false where there is none to make
+---@field stack ffi.array<ffi.uint8_t> # Where a glyph's ink is copied, kept
 ---@field room number # How many pixels that stack holds, grown as glyphs need
----@field cache ffi.cdata* # The SCRIPT_CACHE of the font this face has selected, given back when it changes
+---@field cache ffi.array<SCRIPT_CACHE> # The SCRIPT_CACHE of the font this face has selected, given back when it changes
 ---@field design HANDLE? # The same font at the height lines are placed at: see `DESIGN_HEIGHT`
----@field designCache ffi.cdata* # The SCRIPT_CACHE of that one
+---@field designCache ffi.array<SCRIPT_CACHE> # The SCRIPT_CACHE of that one
 ---@field designScale number # What a distance at that height is at the height asked for
 ---@field distant table<number, number> # What a character outside the basic plane came to, kept
 local Face = {}
@@ -364,7 +421,6 @@ function win32.why()
 end
 
 ---@param text string
----@return WCHAR*, number
 local function wide(text)
 	local buffer = ffi.new("WCHAR[?]", #text + 1)
 
@@ -377,9 +433,8 @@ local from, to = {}, {}
 
 --- Whether a unit is the first half of a character outside the basic plane, and whether the unit
 --- after it is the second half.
----@param units ffi.cdata*
+---@param units ffi.array<ffi.uint16_t>
 ---@param at number
----@return boolean
 local function aPair(units, at)
 	local high = units[at] or 0
 	local low = units[at + 1] or 0
@@ -394,17 +449,16 @@ end
 --- its own -- the joiner that adds another, the selector that says whether it is drawn as a picture
 --- or as a character, the modifier that changes the colour of a person -- and what is cut is a
 --- character with all of that.
----@param units ffi.cdata*
+---@param units ffi.array<ffi.uint16_t>
 ---@param first number
 ---@param last number
----@return number count
 local function cutInto(units, first, last)
 	local at, count, open = first, 0, nil
 
 	while at < last do
 		if aPair(units, at) then
 			if open ~= nil then
-				count = count + 1
+				count += 1
 				from[count], to[count] = open, at
 				open = nil
 			end
@@ -416,26 +470,26 @@ local function cutInto(units, first, last)
 
 				if unit == 0x200D then
 					-- A joiner and what it joins, which is one more picture.
-					after = after + (aPair(units, after + 1) and 3 or 2)
+					after += aPair(units, after + 1) ? 3 : 2
 				elseif unit == 0xFE0E or unit == 0xFE0F or (unit >= 0x1F3FB and unit <= 0x1F3FF) then
-					after = after + 1
+					after += 1
 				else
 					break
 				end
 			end
 
 			after = math.min(after, last)
-			count = count + 1
+			count += 1
 			from[count], to[count] = at, after
 			at = after
 		else
 			open = open or at
-			at = at + 1
+			at += 1
 		end
 	end
 
 	if open ~= nil then
-		count = count + 1
+		count += 1
 		from[count], to[count] = open, last
 	end
 
@@ -447,8 +501,23 @@ end
 -- collector pays for. What a buffer holds is read before the next call rather than kept.
 local room = 0
 
----@type ffi.cdata*
-local items, out, clusters, attributes, advances, offsets = nil, nil, nil, nil, nil, nil
+---@type ffi.array<SCRIPT_ITEM>
+local items = ffi.new("SCRIPT_ITEM[0]")
+
+---@type ffi.array<WORD>
+local out = ffi.new("WORD[0]")
+
+---@type ffi.array<WORD>
+local clusters = ffi.new("WORD[0]")
+
+---@type ffi.array<SCRIPT_VISATTR>
+local attributes = ffi.new("SCRIPT_VISATTR[0]")
+
+---@type ffi.array<ffi.int>
+local advances = ffi.new("int[0]")
+
+---@type ffi.array<GOFFSET>
+local offsets = ffi.new("GOFFSET[0]")
 
 --- A glyph with nothing to draw: a space, and a glyph a font has no picture of, both answer with
 --- it. It is one value rather than one a call, because what it says is the same every time and a line
@@ -463,8 +532,8 @@ local rawMetrics = ffi.new("GLYPHMETRICS")
 local rawTransform = ffi.new("MAT2", FIXED_ONE, 0, 0, FIXED_ONE)
 local rawRoom = 0
 
----@type ffi.cdata*
-local raw = nil
+---@type ffi.array<ffi.uint8_t>
+local raw = ffi.new("unsigned char[0]")
 
 -- What a glyph is asked of DirectWrite with and where the answer is read, made once for the same
 -- reason: a run of one glyph, whose advance is nought -- a pen that does not move is a glyph drawn
@@ -477,6 +546,9 @@ local glyphBounds = ffi.new("RECT")
 local analysisOut = ffi.new("IDWriteGlyphRunAnalysis *[1]")
 local fontFaceOut = ffi.new("IDWriteFontFace *[1]")
 local glyphRun = ffi.new("DWRITE_GLYPH_RUN")
+local colourOut = ffi.new("IDWriteColorGlyphRunEnumerator *[1]")
+local colourRun = ffi.new("DWRITE_COLOR_GLYPH_RUN *[1]")
+local colourMore = ffi.new("BOOL[1]")
 
 glyphRun.glyphCount = 1
 glyphRun.glyphIndices = glyphIndex
@@ -512,7 +584,7 @@ end
 ---@param index number?
 ---@param memory HANDLE?
 ---@param data string?
----@param buffer ffi.cdata*?
+---@param buffer ffi.array<ffi.uint8_t>?
 ---@return texter.win32.Face
 local function fromFamily(family, path, index, memory, data, buffer)
 	local face = setmetatable({
@@ -556,9 +628,15 @@ function win32.face(path, index)
 		return nil, "Could not read " .. path
 	end
 
-	local content = file:read("*all")
+	local content = file:read("*a")
 
 	file:close()
+
+	if type(content) ~= "string" then
+		return nil, "Could not read " .. path
+	end
+
+	---@cast content string
 
 	local family = sfnt.family(content)
 
@@ -571,6 +649,8 @@ function win32.face(path, index)
 	if gdi.AddFontResourceExW(widePath, FR_PRIVATE, nil) == 0 then
 		return nil, "windows would not take the font " .. path
 	end
+
+	---@cast family string
 
 	return fromFamily(family, path, index)
 end
@@ -598,12 +678,13 @@ function win32.faceBytes(content, index)
 		return nil, "windows would not take the embedded font"
 	end
 
+	---@cast family string
+
 	return fromFamily(family, "<memory>", index, memory, content, buffer)
 end
 
 --- One font of this family, at the character height GDI is asked for: a negative height is what
 --- says the height is one of a character rather than of a cell.
----@param self texter.win32.Face
 ---@param height number
 ---@return HANDLE
 function Face:make(height)
@@ -639,7 +720,6 @@ end
 --- is no size of Arial whose line is exactly twenty, the ones either side come to nineteen and
 --- twenty-one, and what stays is the closest of what was tried. Most sizes land exactly on the line
 --- asked for; the ones that do not are a pixel out, which is what a rasteriser of whole pixels is.
----@param self texter.win32.Face
 ---@param pixelHeight number
 function Face:size(pixelHeight)
 	if self.height == pixelHeight then
@@ -653,7 +733,6 @@ function Face:size(pixelHeight)
 	local metrics = ffi.new("TEXTMETRICW")
 
 	--- How far the line the font now selected into the context comes to is from what was asked for.
-	---@return number
 	local function offBy()
 		gdi.GetTextMetricsW(self.context, metrics)
 
@@ -730,7 +809,6 @@ end
 ---
 --- What it costs is the cache of the size being left behind, which is what Uniscribe documents for a
 --- font change, and what a screen pays once for each time it moves from one size to another.
----@param self texter.win32.Face
 function Face:forget()
 	for _, cache in ipairs({ self.cache, self.designCache }) do
 		if cache ~= nil and cache[0] ~= nil then
@@ -766,8 +844,8 @@ function Face:glyphFor(codepoint)
 			return known
 		end
 
-		local line = win32.shape(self, utf8.encode(codepoint), self.height > 0 and self.height or 16)
-		local glyph = #line.glyphs > 0 and line.glyphs[1].glyph or 0
+		local line = win32.shape(self, utf8.encode(codepoint), self.height > 0 ? self.height : 16)
+		local glyph = #line.glyphs > 0 ? assert(line.glyphs[1]).glyph : 0
 
 		self.distant[codepoint] = glyph
 
@@ -807,9 +885,9 @@ function Face:advance(codepoint, pixelHeight)
 	local sizes = ffi.new("ABC[1]")
 
 	-- Measured in the font lines are placed with, for the same reason a line is: see `DESIGN_HEIGHT`.
-	gdi.SelectObject(self.context, self.design)
+	gdi.SelectObject(self.context, assert(self.design))
 	gdi.GetCharABCWidthsW(self.context, codepoint, codepoint, sizes)
-	gdi.SelectObject(self.context, self.font)
+	gdi.SelectObject(self.context, assert(self.font))
 
 	return tonumber(sizes[0].abcA + sizes[0].abcB + sizes[0].abcC) * self.designScale
 end
@@ -821,8 +899,7 @@ end
 --- that size -- so one of them answers every size this face is asked for. What it is made from is
 --- the device context this face keeps with its font selected into it, which is what makes a font an
 --- app brought with it, registered from its bytes, answer the same way a font of the system's does.
----@param self texter.win32.Face
----@return ffi.cdata*?
+---@return ffi.ptr<IDWriteFontFace>?
 function Face:directFace()
 	if self.direct ~= nil then
 		return self.direct or nil
@@ -834,7 +911,12 @@ function Face:directFace()
 		return nil
 	end
 
-	if direct.interop.vtbl.CreateFontFaceFromHdc(direct.interop, self.context, fontFaceOut) ~= 0 then
+	local interop = assert(direct.interop)
+	local vtbl = assert(interop.vtbl)
+
+	local createFromHdc = assert(vtbl.CreateFontFaceFromHdc)
+
+	if createFromHdc(interop, self.context, fontFaceOut) ~= 0 then
 		self.direct = false
 
 		return nil
@@ -843,6 +925,172 @@ function Face:directFace()
 	self.direct = fontFaceOut[0]
 
 	return self.direct
+end
+
+--- One run of a colour glyph, rasterised on its own. What comes back is the coverage of the layer
+--- and where its box sits against the baseline; a colour glyph is a stack of these, drawn back to
+--- front. The buffer is the layer's own, because the next layer is written before the stack is
+--- composited, and a layer is small enough that one allocation a glyph is not worth avoiding.
+---@param run ffi.ptr<DWRITE_GLYPH_RUN> # The layer's DWRITE_GLYPH_RUN
+---@param x number # Where the layer's baseline starts, in pixels
+---@param y number # Where the layer's baseline sits, in pixels
+---@return texter.Ink? ink
+local function rasterRun(run, x, y)
+	local factory = assert(direct.factory)
+	local vtbl = assert(factory.vtbl)
+	local createAnalysis = assert(vtbl.CreateGlyphRunAnalysis)
+	local result = createAnalysis(factory, run, nil,
+		DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, DWRITE_MEASURING_MODE_NATURAL, DWRITE_GRID_FIT_MODE_DEFAULT,
+		DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, x, y, analysisOut)
+
+	if result ~= 0 then
+		return nil
+	end
+
+	local analysis = assert(analysisOut[0])
+	local analysisVtbl = assert(analysis.vtbl)
+	local getBounds = assert(analysisVtbl.GetAlphaTextureBounds)
+	local release = assert(analysisVtbl.Release)
+
+	if getBounds(analysis, DWRITE_TEXTURE_ALIASED_1x1, glyphBounds) ~= 0 then
+		release(analysis)
+
+		return nil
+	end
+
+	local left, top = tonumber(glyphBounds.left), tonumber(glyphBounds.top)
+	local width, height = tonumber(glyphBounds.right) - left, tonumber(glyphBounds.bottom) - top
+
+	if width <= 0 or height <= 0 then
+		release(analysis)
+
+		return nil
+	end
+
+	local pixels = ffi.new("unsigned char[?]", width * height)
+	local createTexture = assert(analysisVtbl.CreateAlphaTexture)
+
+	if createTexture(analysis, DWRITE_TEXTURE_ALIASED_1x1, glyphBounds, pixels, width * height) ~= 0 then
+		release(analysis)
+
+		return nil
+	end
+
+	release(analysis)
+
+	return { width = width, height = height, left = left, top = top, pixels = pixels }
+end
+
+--- A glyph a colour font draws: its layers, each rasterised and painted in the colour the font
+--- gives it, composited back to front into one picture of its own colours. Windows' colour emoji
+--- are exactly this -- a stack of coloured shapes -- and drawing them as the base glyph's outline
+--- would be a black blob.
+---
+--- Nothing is answered where the font has no colour for the glyph, which is what sends the caller
+--- on to the ordinary coverage path. What is answered where it has is the same ink shape as any
+--- other glyph, with four bytes a pixel: blue, green, red and alpha, each already multiplied by
+--- alpha, which is the order `texter.Ink` promises a platform's colour pixels are in.
+---@param glyph number
+---@param dwriteFace ffi.ptr<IDWriteFontFace> # The IDWriteFontFace of this face
+---@param offset number # How far right of the pen the glyph's origin is, in pixels, from nought to one
+---@return texter.Ink? ink # Nothing where the glyph has no colour layers
+function Face:coloured(glyph, dwriteFace, offset)
+	local factory = assert(direct.factory)
+	local factoryVtbl = assert(factory.vtbl)
+	local translate = assert(factoryVtbl.TranslateColorGlyphRun)
+	glyphRun.fontFace = dwriteFace
+	glyphRun.fontEmSize = self.em
+	glyphIndex[0] = glyph
+
+	colourOut[0] = nil
+
+	local result = translate(factory, offset, 0.0, glyphRun,
+		nil, DWRITE_MEASURING_MODE_NATURAL, nil, 0, colourOut)
+
+	if result ~= 0 or colourOut[0] == nil then
+		return nil
+	end
+
+	local enumerator = assert(colourOut[0])
+	local enumeratorVtbl = assert(enumerator.vtbl)
+	local moveNext = assert(enumeratorVtbl.MoveNext)
+	local currentRun = assert(enumeratorVtbl.GetCurrentRun)
+	local releaseEnumerator = assert(enumeratorVtbl.Release)
+	---@type texter.win32.LayerInk[]
+	local layers = {}
+	local left, top, right, bottom = math.huge, math.huge, -math.huge, -math.huge
+
+	while true do
+		colourMore[0] = 0
+
+		if moveNext(enumerator, colourMore) ~= 0 then
+			break
+		end
+
+		if colourMore[0] == 0 then
+			break
+		end
+
+		if currentRun(enumerator, ffi.cast("const DWRITE_COLOR_GLYPH_RUN **", colourRun)) == 0 and colourRun[0] ~= nil then
+			local layer = colourRun[0]
+			local ink = rasterRun(layer.glyphRun, layer.baselineOriginX, layer.baselineOriginY)
+
+			if ink ~= nil and ink.width > 0 and ink.height > 0 then
+				local runColor = layer.runColor
+
+				---@cast ink texter.win32.LayerInk
+				setmetatable(ink, { __index = { r = runColor.r, g = runColor.g, b = runColor.b, a = runColor.a } })
+				layers[#layers + 1] = ink
+				left = math.min(left, ink.left)
+				top = math.min(top, ink.top)
+				right = math.max(right, ink.left + ink.width)
+				bottom = math.max(bottom, ink.top + ink.height)
+			end
+		end
+	end
+
+	releaseEnumerator(enumerator)
+
+	if #layers == 0 then
+		return nil
+	end
+
+	local width, height = right - left, bottom - top
+	local pixels = ffi.new("unsigned char[?]", width * height * 4)
+
+	-- Back to front: a layer covers what is behind it, and what is left of the layer behind is
+	-- what shows through where it is not. The answer is premultiplied, which is what an atlas
+	-- expects and what makes the shader's blend one multiply.
+	for _, layer in ipairs(layers) do
+		local x, y = layer.left - left, layer.top - top
+		local alpha = layer.a
+
+		for row = 0, layer.height - 1 do
+			local from = layer.pixels + row * layer.width
+			local into = pixels + ((y + row) * width + x) * 4
+
+			for column = 0, layer.width - 1 do
+				local coverage = from[column] / 255
+				local source = alpha * coverage
+				local keep = 1 - source
+				local at = column * 4
+
+				into[at] = math.floor(layer.b * source * 255 + into[at] * keep + 0.5)
+				into[at + 1] = math.floor(layer.g * source * 255 + into[at + 1] * keep + 0.5)
+				into[at + 2] = math.floor(layer.r * source * 255 + into[at + 2] * keep + 0.5)
+				into[at + 3] = math.floor(source * 255 + into[at + 3] * keep + 0.5)
+			end
+		end
+	end
+
+	return {
+		width = width,
+		height = height,
+		left = left,
+		top = top,
+		pixels = pixels,
+		colour = true,
+	}
 end
 
 --- A glyph as DirectWrite draws it, its origin at a fraction of a pixel to the right of the pen.
@@ -857,17 +1105,25 @@ end
 --- What is asked for is natural symmetric grayscale, which is how windows draws its own text: eight
 --- bits of coverage a pixel with the outline's own weight, rather than GDI's sixty-five hinted
 --- steps. What it costs is one analysis a glyph, which is what GDI's outline was.
----@param self texter.win32.Face
----@param dwriteFace ffi.cdata* # The IDWriteFontFace of this face
 ---@param glyph number
+---@param dwriteFace ffi.ptr<IDWriteFontFace> # The IDWriteFontFace of this face
 ---@param offset number # How far right of the pen the glyph's origin is, in pixels, from nought to one
 ---@return texter.Ink? ink # Nothing where DirectWrite answered nothing at all
-function Face:drawn(dwriteFace, glyph, offset)
+function Face:drawn(glyph, dwriteFace, offset)
+	local coloured = self:coloured(glyph, dwriteFace, offset)
+
+	if coloured ~= nil then
+		return coloured
+	end
+
 	glyphRun.fontFace = dwriteFace
 	glyphRun.fontEmSize = self.em
 	glyphIndex[0] = glyph
 
-	local result = direct.factory.vtbl.CreateGlyphRunAnalysis(direct.factory, glyphRun, nil,
+	local factory = assert(direct.factory)
+	local factoryVtbl = assert(factory.vtbl)
+	local createAnalysis = assert(factoryVtbl.CreateGlyphRunAnalysis)
+	local result = createAnalysis(factory, glyphRun, nil,
 		DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, DWRITE_MEASURING_MODE_NATURAL, DWRITE_GRID_FIT_MODE_DEFAULT,
 		DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, offset, 0.0, analysisOut)
 
@@ -875,10 +1131,13 @@ function Face:drawn(dwriteFace, glyph, offset)
 		return nil
 	end
 
-	local analysis = analysisOut[0]
+	local analysis = assert(analysisOut[0])
+	local analysisVtbl = assert(analysis.vtbl)
+	local getBounds = assert(analysisVtbl.GetAlphaTextureBounds)
+	local release = assert(analysisVtbl.Release)
 
-	if analysis.vtbl.GetAlphaTextureBounds(analysis, DWRITE_TEXTURE_ALIASED_1x1, glyphBounds) ~= 0 then
-		analysis.vtbl.Release(analysis)
+	if getBounds(analysis, DWRITE_TEXTURE_ALIASED_1x1, glyphBounds) ~= 0 then
+		release(analysis)
 
 		return nil
 	end
@@ -888,7 +1147,7 @@ function Face:drawn(dwriteFace, glyph, offset)
 
 	-- A space, and a glyph a font has no picture of, are a box of nought wide.
 	if width <= 0 or height <= 0 then
-		analysis.vtbl.Release(analysis)
+		release(analysis)
 
 		return NOTHING
 	end
@@ -906,13 +1165,15 @@ function Face:drawn(dwriteFace, glyph, offset)
 
 	-- The coverage is one byte a pixel with no padding, which is what an atlas packs and what an
 	-- aliased texture of one by one is: the face's own stack is what it is written into.
-	if analysis.vtbl.CreateAlphaTexture(analysis, DWRITE_TEXTURE_ALIASED_1x1, glyphBounds, stack, count) ~= 0 then
-		analysis.vtbl.Release(analysis)
+	local createTexture = assert(analysisVtbl.CreateAlphaTexture)
+
+	if createTexture(analysis, DWRITE_TEXTURE_ALIASED_1x1, glyphBounds, stack, count) ~= 0 then
+		release(analysis)
 
 		return nil
 	end
 
-	analysis.vtbl.Release(analysis)
+	release(analysis)
 
 	return { width = width, height = height, left = left, top = top, pixels = stack }
 end
@@ -922,7 +1183,6 @@ end
 --- What GDI hands back is hinted to the pixel grid and counts to sixty-four steps of coverage, which
 --- is coarser than the eight bits a pixel holds. The fraction of the pen is not something it can be
 --- asked about: a glyph is drawn at the whole pixel it is at.
----@param self texter.win32.Face
 ---@param glyph number
 ---@return texter.Ink
 function Face:hinted(glyph)
@@ -988,7 +1248,6 @@ end
 --- rather than one drawn at a pixel and moved: `offset` is that fraction, and DirectWrite is what
 --- draws it. Where there is no DirectWrite -- or where it would not draw a glyph at all -- what is
 --- answered is GDI's, and the fraction is dropped: a glyph is drawn at the pixel it starts at.
----@param self texter.win32.Face
 ---@param glyph number
 ---@param pixelHeight number
 ---@param offset number?
@@ -999,7 +1258,7 @@ function Face:inkOf(glyph, pixelHeight, offset)
 	local dwriteFace = self:directFace()
 
 	if dwriteFace ~= nil then
-		local ink = self:drawn(dwriteFace, glyph, offset or 0)
+		local ink = self:drawn(glyph, dwriteFace, offset or 0)
 
 		if ink ~= nil then
 			return ink
@@ -1009,7 +1268,7 @@ function Face:inkOf(glyph, pixelHeight, offset)
 	return self:hinted(glyph)
 end
 
----@param ink texter.Ink
+---@param _ink texter.Ink
 function Face:freeInk(_ink)
 end
 
@@ -1054,7 +1313,7 @@ function win32.shape(face, text, pixelHeight, _opts)
 	---@param unit number
 	---@return number
 	local function byteOf(unit)
-		local at = unit >= 0 and bytes[unit] or nil
+		local at = unit >= 0 ? bytes[unit] : nil
 
 		return (at or (#text + 1)) - 1
 	end
@@ -1068,7 +1327,7 @@ function win32.shape(face, text, pixelHeight, _opts)
 		ffi.copy(analysis, item.a, ffi.sizeof("SCRIPT_ANALYSIS"))
 
 		local first = item.iCharPos
-		local last = (index < used[0] - 1) and items[index + 1].iCharPos or count
+		local last = (index < used[0] - 1) ? items[index + 1].iCharPos : count
 		local flags = item.a.flags
 		local rtl = math.floor(flags / RIGHT_TO_LEFT) % 2 == 1
 		local logical = math.floor(flags / LOGICAL_ORDER) % 2 == 1
@@ -1116,13 +1375,13 @@ function win32.shape(face, text, pixelHeight, _opts)
 				local total = 0
 
 				for step = 0, shaped[0] - 1 do
-					total = total + advances[step] * scale
+					total += advances[step] * scale
 				end
 
 				local trailing = total
 
 				for step = shaped[0] - 1, 0, -1 do
-					trailing = trailing - advances[step] * scale
+					trailing -= advances[step] * scale
 
 					glyphs[#glyphs + 1] = {
 						glyph = out[step],
@@ -1133,7 +1392,7 @@ function win32.shape(face, text, pixelHeight, _opts)
 					}
 				end
 
-				x = x + total
+				x += total
 			else
 				for step = 0, shaped[0] - 1 do
 					glyphs[#glyphs + 1] = {
@@ -1144,7 +1403,7 @@ function win32.shape(face, text, pixelHeight, _opts)
 						advance = advances[step] * scale,
 					}
 
-					x = x + advances[step] * scale
+					x += advances[step] * scale
 				end
 			end
 		end
@@ -1152,7 +1411,7 @@ function win32.shape(face, text, pixelHeight, _opts)
 
 	-- Uniscribe places the items in the order they are drawn in, so the line is as it came back:
 	-- what a line reads as is what the first item was analyzed as.
-	local rtl = used[0] > 0 and math.floor(items[0].a.flags / RIGHT_TO_LEFT) % 2 == 1 or false
+	local rtl = used[0] > 0 ? math.floor(items[0].a.flags / RIGHT_TO_LEFT) % 2 == 1 : false
 
 	return { glyphs = glyphs, width = x, rtl = rtl, runs = runs, text = text }
 end
@@ -1168,7 +1427,7 @@ win32.subpixel = direct.factory ~= nil
 ---@param opts texter.InkOpts?
 ---@return texter.Ink
 function win32.ink(face, glyph, pixelHeight, opts)
-	return face:inkOf(glyph, pixelHeight, opts and opts.offset or 0)
+	return face:inkOf(glyph, pixelHeight, opts?.offset or 0)
 end
 
 ---@param face texter.win32.Face
@@ -1191,7 +1450,7 @@ function win32.penOf(line, byte)
 			return pen
 		end
 
-		pen = pen + glyph.advance
+		pen += glyph.advance
 	end
 
 	return line.width
@@ -1208,28 +1467,52 @@ function win32.byteAt(line, x)
 			return glyph.cluster
 		end
 
-		pen = pen + glyph.advance
+		pen += glyph.advance
 	end
 
 	return #line.text + 1
 end
 
--- What a UI library asks a reader of fonts for -- see `wonderland.font.Provider`: the faces, and the
--- shaping a screen that draws its lines as glyphs rather than characters needs.
----@type wonderland.font.Provider
+-- What a UI library asks a reader of fonts for -- see `texter.Provider`: the faces, and the shaping
+-- a screen that draws its lines as glyphs rather than characters needs.
+---@param path string
+---@param index number?
+---@return texter.win32.Face? face
+---@return string? err
+local function providerOpen(path, index)
+	return win32.face(path, index)
+end
+
+---@param content string
+---@param index number?
+---@return texter.win32.Face? face
+---@return string? err
+local function providerOpenBytes(content, index)
+	return win32.faceBytes(content, index)
+end
+
+---@param face texter.win32.Face
+---@param text string
+---@param pixelHeight number
+---@param opts texter.ShapeOpts?
+local function providerShape(face, text, pixelHeight, opts)
+	return win32.shape(face, text, pixelHeight, opts)
+end
+
+---@param face texter.win32.Face
+---@param glyph number
+---@param pixelHeight number
+---@param opts texter.InkOpts?
+local function providerInk(face, glyph, pixelHeight, opts)
+	return win32.ink(face, glyph, pixelHeight, opts)
+end
+
+---@type texter.Provider
 win32.provider = {
-	open = function(path, index)
-		return win32.face(path, index)
-	end,
-	openBytes = function(content, index)
-		return win32.faceBytes(content, index)
-	end,
-	shape = function(face, text, pixelHeight, opts)
-		return win32.shape(face, text, pixelHeight, opts)
-	end,
-	ink = function(face, glyph, pixelHeight, opts)
-		return win32.ink(face, glyph, pixelHeight, opts)
-	end,
+	open = providerOpen,
+	openBytes = providerOpenBytes,
+	shape = providerShape,
+	ink = providerInk,
 	subpixel = win32.subpixel,
 }
 

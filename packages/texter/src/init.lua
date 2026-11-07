@@ -37,6 +37,7 @@ local ffi = require("ffi")
 ---@type table<string, string>
 local BACKENDS = {
 	Linux = "texter-freetype",
+	Android = "texter-freetype",
 	Windows = "texter-win32",
 	OSX = "texter-coretext",
 }
@@ -54,14 +55,33 @@ local BACKENDS = {
 ---@field faceBytes fun(content: string, index: number?): texter.Face?, string?
 ---@field shape fun(face: texter.Face, text: string, pixelHeight: number, opts: texter.ShapeOpts?): texter.Line
 ---@field ink fun(face: texter.Face, glyph: number, pixelHeight: number, opts: texter.InkOpts?): texter.Ink
+---@field metrics fun(face: texter.Face, pixelHeight: number): number, number, number
 ---@field subpixel boolean? # Whether `ink` draws a glyph at `opts.offset`, or always at a whole pixel
 ---@field penOf fun(line: texter.Line, byte: number): number
 ---@field byteAt fun(line: texter.Line, x: number): number
+---@field provider texter.Provider?
+
+---@class texter.FontManager
+---@field setProvider fun(provider: texter.Provider?): any
+
+---@class texter.Provider
+---@field open fun(path: string, index: number?): texter.Face?, string?
+---@field openBytes fun(content: string, index: number?): texter.Face?, string?
+---@field shape fun(face: texter.Face, text: string, pixelHeight: number, opts: texter.ShapeOpts?): texter.Line
+---@field ink fun(face: texter.Face, glyph: number, pixelHeight: number, opts: texter.InkOpts?): texter.Ink
+---@field metrics fun(face: texter.Face, pixelHeight: number): number, number, number
+---@field subpixel boolean?
 
 --- A font file read.
 ---@class texter.Face
 ---@field path string
 ---@field index number
+---@field hasGlyph fun(self: texter.Face, codepoint: number): boolean
+---@field metrics fun(self: texter.Face, pixelHeight: number): number, number, number
+---@field advance fun(self: texter.Face, codepoint: number, pixelHeight: number): number
+---@field ink fun(self: texter.Face, codepoint: number, pixelHeight: number): texter.Ink
+---@field inkOf fun(self: texter.Face, glyph: number, pixelHeight: number): texter.Ink
+---@field freeInk fun(self: texter.Face, ink: texter.Ink)
 
 --- The ink of a glyph: its size, where it sits against the pen and the baseline, and its pixels.
 ---
@@ -79,7 +99,7 @@ local BACKENDS = {
 ---@field height number
 ---@field left number
 ---@field top number
----@field pixels ffi.cdata*?
+---@field pixels ffi.array<ffi.uint8_t>?
 ---@field colour boolean? # Four bytes a pixel rather than one of coverage
 
 --- What a string comes to when it is shaped.
@@ -124,6 +144,8 @@ local texter = {}
 
 local name = BACKENDS[ffi.os]
 local reason = nil
+
+---@type texter.Backend?
 local backend = nil
 
 if name == nil then
@@ -132,6 +154,7 @@ else
 	local ok, loaded = pcall(require, name)
 
 	if ok then
+		---@cast loaded texter.Backend
 		backend = loaded
 	else
 		reason = "texter was installed without its " .. ffi.os .. " backend (" .. name .. "): "
@@ -147,8 +170,8 @@ texter.backend = backend
 --- face, `shape(face, text, size)`, and `ink(face, glyph, size)`. See `wonderland`'s
 --- `wonderland.font.Provider`, which is what it is handed to, and `available()` for a machine whose
 --- text this cannot be.
----@type table?
-texter.provider = backend ~= nil and backend.provider or nil
+---@type texter.Provider?
+texter.provider = backend?.provider
 
 ---@type string?
 texter.name = name
@@ -273,6 +296,7 @@ function texter.install()
 		return false
 	end
 
+	---@cast fontManager texter.FontManager
 	fontManager.setProvider(backend.provider)
 
 	return true

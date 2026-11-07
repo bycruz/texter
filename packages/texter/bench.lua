@@ -46,6 +46,8 @@ if not texter.available() or fontPath == nil then
 	os.exit(1)
 end
 
+---@cast fontPath string
+
 local face = assert(texter.face(fontPath))
 
 print(string.format("font %s\n", fontPath))
@@ -70,7 +72,7 @@ local function measure(name, work, rounds)
 	local best = math.huge
 
 	for _ = 1, BATCHES do
-		allocated = allocated + (collectgarbage("count") - before)
+		allocated += (collectgarbage("count") - before)
 		before = collectgarbage("count")
 
 		local start = os.clock()

@@ -33,6 +33,8 @@ ffi.cdef [[
 	typedef int FT_Bool;
 
 	typedef struct { FT_Byte blue, green, red, alpha; } FT_Color;
+	typedef struct { long x, y; } FT_Vector;
+	typedef struct FT_FaceRec_* FT_Face;
 
 	typedef struct { long xx, xy, yx, yy; } FT_Matrix;
 
@@ -151,7 +153,6 @@ local SKEW = 28
 local COMPOSITE = 32
 
 -- FT_COLR_PAINT_EXTEND_*: how a gradient carries on past the ends of itself.
-local PAD = 0
 local REPEAT = 1
 local REFLECT = 2
 
@@ -208,11 +209,8 @@ local MAX_NODES = 4096
 -- and one mask for the shapes a paint is put through.
 local room = 0
 
----@type table<number, ffi.cdata*>
+---@type table<number, ffi.array<ffi.uint8_t>>
 local levels = {}
-
----@type ffi.cdata*
-local mask = nil
 
 --- Grows what is painted into to hold a picture of this many pixels, in as many levels as a graph
 --- may nest.
@@ -223,20 +221,16 @@ local function grow(pixels)
 	end
 
 	room = pixels
-	levels = {}
 
 	for index = 1, MAX_DEPTH + 1 do
 		levels[index] = ffi.new("unsigned char[?]", room * 4)
 	end
-
-	mask = ffi.new("unsigned char[?]", room)
 end
 
 --- What a fixed point value of a font comes to, in the whole numbers this counts in: a fixed
 --- point value is a long, and what a long is to this language is a value of its own rather than a
 --- number, so every one of them is read where it is rather than where it is used.
----@param value ffi.cdata*|number
----@return number
+---@param value FT_Fixed|number
 local function fixed(value)
 	return tonumber(value) / ONE_16_16
 end
@@ -252,14 +246,13 @@ end
 local colour = { blue = 0, green = 0, red = 0, alpha = 0 }
 
 --- The palettes of the faces read so far: what a colour index of a graph names.
----@type table<ffi.cdata*, ffi.cdata*?>
+---@type table<FT_Face, ffi.ptr<FT_Color>|false>
 local palettes = setmetatable({}, { __mode = "k" })
 
 --- The colours a font's indices name, which is what every paint of it is drawn in. It is read once
 --- for a face: a palette is a few hundred bytes and every glyph of the font is drawn in it.
----@param library ffi.cdata*
----@param face texter.freetype.ffi.Face
----@return ffi.cdata*? palette
+---@param library ffi.namespace*
+---@param face FT_Face
 local function paletteOf(library, face)
 	local known = palettes[face]
 
@@ -299,10 +292,9 @@ local function paletteOf(library, face)
 end
 
 --- What a colour index of a graph is worth, and how much of it.
----@param palette ffi.cdata*?
+---@param palette ffi.ptr<FT_Color>?
 ---@param index number
 ---@param alpha number # From nought to one
----@return texter.paint.Colour
 local function colourOf(palette, index, alpha)
 	if palette == nil then
 		colour.blue, colour.green, colour.red, colour.alpha = 0, 0, 0, 0
@@ -326,10 +318,10 @@ end
 ---@field blue number
 ---@field alpha number
 
----@param library ffi.cdata*
----@param face texter.freetype.ffi.Face
----@param line ffi.cdata* # The color line of a gradient, which holds where its stops are read from
----@param palette ffi.cdata*?
+---@param library ffi.namespace*
+---@param face FT_Face
+---@param line ffi.ptr<FT_ColorLine> # The color line of a gradient, which holds where its stops are read from
+---@param palette ffi.ptr<FT_Color>?
 ---@return texter.paint.Stop[]
 local function stopsOf(library, face, line, palette)
 	local stops = {}
@@ -366,7 +358,6 @@ local toPixels = { xx = 1, xy = 0, yx = 0, yy = 1, dx = 0, dy = 0 }
 --- Where along a gradient a point is, carried on past the ends of it the way the font says to.
 ---@param extend number
 ---@param at number
----@return number
 local function carried(extend, at)
 	if extend == REPEAT then
 		return at - math.floor(at)
@@ -409,7 +400,7 @@ local function between(stops, at)
 		if at <= upper.offset then
 			local lower = stops[index - 1]
 			local span = upper.offset - lower.offset
-			local along = span > 0 and (at - lower.offset) / span or 0
+			local along = span > 0 ? (at - lower.offset) / span : 0
 
 			return lower.red + (upper.red - lower.red) * along, lower.green + (upper.green - lower.green) * along,
 				lower.blue + (upper.blue - lower.blue) * along, lower.alpha + (upper.alpha - lower.alpha) * along
@@ -454,7 +445,6 @@ end
 
 --- Whether a placement moves nothing, which is the whole of what most graphs do.
 ---@param placement texter.paint.Placement
----@return boolean
 local function still(placement)
 	return placement.xx == 1 and placement.xy == 0 and placement.yx == 0 and placement.yy == 1
 		and placement.dx == 0 and placement.dy == 0
@@ -462,7 +452,7 @@ end
 
 --- One pixel of a source, put over what is already there: what compositing is, with the source
 --- multiplied by whatever part of it the shape it is painted on covers.
----@param into ffi.cdata* # The picture, four bytes a pixel
+---@param into ffi.array<ffi.uint8_t> # The picture, four bytes a pixel
 ---@param at number # Which pixel of it, in bytes
 ---@param blue number
 ---@param green number
@@ -480,8 +470,8 @@ end
 --- Two paints put together, one of them the source and the other the backdrop, the way the mode
 --- says. Both are four bytes a pixel, each already multiplied by its own alpha.
 ---@param mode number
----@param into ffi.cdata* # The backdrop, which what comes of it is written back into
----@param from ffi.cdata* # The source
+---@param into ffi.array<ffi.uint8_t> # The backdrop, which what comes of it is written back into
+---@param from ffi.array<ffi.uint8_t> # The source
 ---@param pixels number
 local function blend(mode, into, from, pixels)
 	for at = 0, pixels * 4 - 1, 4 do
@@ -542,7 +532,7 @@ local function blend(mode, into, from, pixels)
 			end
 
 			local function plain(s, a)
-				return a > 0 and s / (a / 255) or 0
+				return a > 0 ? s / (a / 255) : 0
 			end
 
 			local sbp, sgp, srp = plain(sb, sa), plain(sg, sa), plain(sr, sa)
@@ -583,24 +573,23 @@ end
 local nodes = 0
 
 --- Paints a node of a graph, and everything under it, into a buffer.
----@param library ffi.cdata*
----@param face texter.freetype.ffi.Face
+---@param library ffi.namespace*
+---@param face FT_Face
 ---@param opaque FT_OpaquePaint
----@param into ffi.cdata* # Where it is painted, four bytes a pixel, cleared by the caller
+---@param into ffi.array<ffi.uint8_t> # Where it is painted, four bytes a pixel, cleared by the caller
 ---@param width number
 ---@param height number
 ---@param placement texter.paint.Placement
 ---@param depth number
----@param palette ffi.cdata*?
+---@param palette ffi.ptr<FT_Color>?
 ---@param left number # Where the picture's own corner is against the glyph's origin
 ---@param top number
----@return boolean painted
 local function paintNode(library, face, opaque, into, width, height, placement, depth, palette, left, top)
 	if depth > MAX_DEPTH or nodes > MAX_NODES then
 		return false
 	end
 
-	nodes = nodes + 1
+	nodes += 1
 
 	local node = ffi.new("FT_COLR_Paint[1]")
 
@@ -691,7 +680,7 @@ local function paintNode(library, face, opaque, into, width, height, placement, 
 					else
 						local length = along1x * along1x + along1y * along1y
 
-						at = length > 0 and (px * along1x + py * along1y) / length or 0
+						at = length > 0 ? (px * along1x + py * along1y) / length : 0
 					end
 				elseif format == RADIAL then
 					local x0, y0 = fixed(gradient.c0.x), fixed(gradient.c0.y)
@@ -706,7 +695,7 @@ local function paintNode(library, face, opaque, into, width, height, placement, 
 					local c = px * px + py * py - r0 * r0
 
 					if a == 0 then
-						at = b ~= 0 and -c / (2 * b) or 0
+						at = b ~= 0 ? -c / (2 * b) : 0
 					else
 						local inside = b * b - a * c
 
@@ -956,10 +945,9 @@ local paint = {}
 
 --- Whether this face has a graph of how to paint this glyph, which is what a colour glyph of the
 --- newest kind is: a picture rather than an outline, and nothing FreeType draws by itself.
----@param library ffi.cdata*
----@param face texter.freetype.ffi.Face
+---@param library ffi.namespace*
+---@param face FT_Face
 ---@param glyph number
----@return boolean
 function paint.has(library, face, glyph)
 	local opaque = ffi.new("FT_OpaquePaint[1]")
 
@@ -968,8 +956,8 @@ end
 
 --- The box a colour glyph is painted in, which is what the graph comes to rather than what the
 --- glyph's own empty outline comes to: what a caller is handed as the size of the picture.
----@param library ffi.cdata*
----@param face texter.freetype.ffi.Face
+---@param library ffi.namespace*
+---@param face FT_Face
 ---@param glyph number
 ---@param height number # The pixel height the face is at, for a font that states no box
 ---@return number left
@@ -995,7 +983,7 @@ function paint.boxOf(library, face, glyph, height)
 	-- A font that states no box of its own is drawn in the room a line of it has, which is what a
 	-- picture of a glyph is: one that is bigger than that is bigger than anything drawing it wants.
 	local ascent, descent = face.ascender, face.descender
-	local scale = (ascent - descent) > 0 and height / (ascent - descent) or 1
+	local scale = (ascent - descent) > 0 ? height / (ascent - descent) : 1
 
 	return 0, math.ceil(ascent * scale), math.ceil(height), math.ceil(height)
 end
@@ -1005,10 +993,10 @@ end
 ---
 --- What comes back is whether the glyph was a graph at all: a glyph that is not one is a glyph some
 --- other path draws.
----@param library ffi.cdata*
----@param face texter.freetype.ffi.Face
+---@param library ffi.namespace*
+---@param face FT_Face
 ---@param glyph number
----@param into ffi.cdata* # Where it is painted, the size of the box
+---@param into ffi.array<ffi.uint8_t> # Where it is painted, the size of the box
 ---@param left number # Where the box is against the glyph's origin
 ---@param top number
 ---@param width number

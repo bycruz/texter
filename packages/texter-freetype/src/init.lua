@@ -34,10 +34,14 @@ local texter = {}
 -- a face is the reader's and this is the shaper's. The keys are weak, so what is kept of a face
 -- goes when the face does.
 ---@type table<texter.freetype.Face, string>
-local contents = setmetatable({}, { __mode = "k" })
+local contents = {}
 
----@type table<texter.freetype.Face, table<number, ffi.cdata*>>
-local shapedFonts = setmetatable({}, { __mode = "k" })
+setmetatable(contents, { __mode = "k" })
+
+---@type table<texter.freetype.Face, table<number, ffi.ptr<hb_font_t>>>
+local shapedFonts = {}
+
+setmetatable(shapedFonts, { __mode = "k" })
 
 --- One line, shaped and placed: what a renderer draws.
 ---@class texter.Line
@@ -69,8 +73,7 @@ end
 --- The bytes of a font file, read the first time a line is shaped from that face: what HarfBuzz reads
 --- a font's tables out of is the whole file, and FreeType needs none of it. So a face a screen only
 --- packs glyphs from is copied by nobody, and one a line is shaped in costs one copy of the file.
----@param face texter-freetype.Face
----@return string? content
+---@param face texter.freetype.Face
 local function contentOf(face)
 	local content = contents[face]
 
@@ -90,19 +93,24 @@ local function contentOf(face)
 		return nil
 	end
 
-	content = file:read("*all")
+	local text = file:read("*a")
 
 	file:close()
 
-	contents[face] = content
+	if type(text) ~= "string" then
+		return nil
+	end
 
-	return content
+	---@cast text string
+	contents[face] = text
+
+	return text
 end
 
 --- One font file, read: what the reader and the shaper both need of it.
 ---@param path string
 ---@param index number?
----@return texter-freetype.Face? face
+---@return texter.freetype.Face? face
 ---@return string? err
 function texter.face(path, index)
 	local face, err = freetype.open(path, index)
@@ -124,7 +132,7 @@ end
 --- the same bytes, and neither reads a path.
 ---@param content string
 ---@param index number?
----@return texter-freetype.Face? face
+---@return texter.freetype.Face? face
 ---@return string? err
 function texter.faceBytes(content, index)
 	local face, err = freetype.openBytes(content, index)
@@ -145,7 +153,7 @@ end
 --- The line is cut into runs first -- one direction each, by the bidi algorithm -- and each run is
 --- shaped in its own direction and script by HarfBuzz. What comes back is the runs in the order a
 --- screen draws them, with the glyphs of each placed one after another.
----@param face texter-freetype.Face
+---@param face texter.freetype.Face
 ---@param text string
 ---@param pixelHeight number
 ---@param opts { direction: "ltr" | "rtl" | "auto"?, language: string? }?
@@ -164,15 +172,15 @@ function texter.shape(face, text, pixelHeight, opts)
 
 	for _, run in ipairs(runs) do
 		local shaped, width = harfbuzz.shape(font, text, {
-			direction = run.rtl and "rtl" or "ltr",
-			language = opts and opts.language,
+			direction = run.rtl ? "rtl" : "ltr",
+			language = opts?.language,
 			from = run.first,
 			to = run.last,
 			x = x,
 		}, glyphs, count)
 
-		count = count + shaped
-		x = x + width
+		count += shaped
+		x += width
 	end
 
 	return {
@@ -187,9 +195,9 @@ end
 --- The font a line is shaped with at a size, made once and kept: a shaped font is what HarfBuzz
 --- reads a font's own tables into, and making one for every line of every frame is the machine
 --- reading the same thousand tables again.
----@param face texter-freetype.Face
+---@param face texter.freetype.Face
 ---@param pixelHeight number
----@return ffi.cdata* font
+---@return ffi.ptr<hb_font_t>
 function texter.fontOf(face, pixelHeight)
 	local kept = shapedFonts[face]
 	local content = contentOf(face)
@@ -247,7 +255,7 @@ function texter.penOf(line, byte)
 			return pen
 		end
 
-		pen = pen + glyph.advance
+		pen += glyph.advance
 	end
 
 	return line.width
@@ -268,7 +276,7 @@ function texter.byteAt(line, x)
 			return glyph.cluster
 		end
 
-		pen = pen + glyph.advance
+		pen += glyph.advance
 	end
 
 	return #line.text + 1
@@ -276,20 +284,44 @@ end
 
 -- What a UI library asks a reader of fonts for -- see `wonderland.font.Provider`: the faces, and the
 -- shaping a screen that draws its lines as glyphs rather than characters needs.
----@type wonderland.font.Provider
+---@param path string
+---@param index number?
+---@return texter.freetype.Face? face
+---@return string? err
+local function providerOpen(path, index)
+	return freetype.open(path, index)
+end
+
+---@param content string
+---@param index number?
+---@return texter.freetype.Face? face
+---@return string? err
+local function providerOpenBytes(content, index)
+	return texter.faceBytes(content, index)
+end
+
+---@param face texter.freetype.Face
+---@param text string
+---@param pixelHeight number
+---@param opts texter.ShapeOpts?
+local function providerShape(face, text, pixelHeight, opts)
+	return texter.shape(face, text, pixelHeight, opts)
+end
+
+---@param face texter.freetype.Face
+---@param glyph number
+---@param pixelHeight number
+---@param _opts texter.InkOpts?
+local function providerInk(face, glyph, pixelHeight, _opts)
+	return texter.ink(face, glyph, pixelHeight)
+end
+
+---@type texter.Provider
 texter.provider = {
-	open = function(path, index)
-		return freetype.open(path, index)
-	end,
-	openBytes = function(content, index)
-		return texter.faceBytes(content, index)
-	end,
-	shape = function(face, text, pixelHeight, opts)
-		return texter.shape(face, text, pixelHeight, opts)
-	end,
-	ink = function(face, glyph, pixelHeight)
-		return texter.ink(face, glyph, pixelHeight)
-	end,
+	open = providerOpen,
+	openBytes = providerOpenBytes,
+	shape = providerShape,
+	ink = providerInk,
 }
 
 --- Where wonderland is there, makes these the fonts it draws with: what it reads and what it
@@ -302,6 +334,7 @@ function texter.install()
 		return false
 	end
 
+	---@cast fontManager texter.FontManager
 	fontManager.setProvider(texter.provider)
 
 	return true

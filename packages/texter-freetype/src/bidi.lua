@@ -32,12 +32,15 @@ local NAMES = { "fribidi", "libfribidi.so.0", "libfribidi.0.dylib", "fribidi-0.d
 
 local bidi = {}
 
-local library, reason = nil, nil
+---@type ffi.namespace*?
+local library = nil
+local reason = nil
 
 for _, name in ipairs(NAMES) do
 	local ok, loaded = pcall(ffi.load, name)
 
 	if ok then
+		---@cast loaded ffi.namespace*
 		library, bidi.library = loaded, name
 		break
 	end
@@ -114,7 +117,7 @@ local function oneRun(text, characters)
 		end
 	end
 
-	return { { first = 1, last = #text, rtl = rtl, level = rtl and 1 or 0 } }, rtl
+	return { { first = 1, last = #text, rtl = rtl, level = rtl ? 1 : 0 } }, rtl
 end
 
 -- What the algorithm is handed and what it answers with, kept and grown rather than made again: a
@@ -124,8 +127,14 @@ end
 -- before the next call rather than kept.
 local room = 0
 
----@type ffi.cdata*
-local types, levels, base = nil, nil, nil
+---@type ffi.array<FriBidiCharType>
+local types = ffi.new("FriBidiCharType[0]")
+
+---@type ffi.array<FriBidiLevel>
+local levels = ffi.new("FriBidiLevel[0]")
+
+---@type ffi.array<FriBidiParType>
+local base = ffi.new("FriBidiParType[1]")
 
 ---@param count number
 local function grow(count)
@@ -136,7 +145,6 @@ local function grow(count)
 	room = count
 	types = ffi.new("FriBidiCharType[?]", room)
 	levels = ffi.new("FriBidiLevel[?]", room)
-	base = base or ffi.new("FriBidiParType[1]")
 end
 
 --- A line cut into runs, in the order a screen draws them.
@@ -165,12 +173,14 @@ function bidi.paragraph(text, characters, opts)
 	-- What a character is -- a letter, a number, a space -- is what the algorithm works on, and what
 	-- the characters of the line are is already a buffer of its own: a codepoint of a string read as
 	-- UTF-8 is the same number of the same width the algorithm wants.
-	library.fribidi_get_bidi_types(characters.codepoints, count, types)
+	local api = assert(library)
+	local direction = opts?.direction
 
-	base[0] = (opts and opts.direction) == "rtl" and PAR_RTL
-		or ((opts and opts.direction) == "ltr" and PAR_LTR or PAR_ON)
+	api.fribidi_get_bidi_types(characters.codepoints, count, types)
 
-	library.fribidi_get_par_embedding_levels(types, count, base, levels)
+	base[0] = direction == "rtl" ? PAR_RTL : (direction == "ltr" ? PAR_LTR : PAR_ON)
+
+	api.fribidi_get_par_embedding_levels(types, count, base, levels)
 
 	-- The runs, in the order the line reads in -- which is not the order it is drawn in where any
 	-- of it is right to left. What a run covers is the bytes of it: from the byte its first
@@ -180,7 +190,7 @@ function bidi.paragraph(text, characters, opts)
 	for index = 0, count - 1 do
 		local level = levels[index]
 		local rtl = level % 2 == 1
-		local last = index + 1 < count and characters.offsets[index + 1] - 1 or #text
+		local last = index + 1 < count ? characters.offsets[index + 1] - 1 : #text
 
 		if current ~= nil and current.rtl == rtl then
 			current.last = last
@@ -213,11 +223,15 @@ function bidi.paragraph(text, characters, opts)
 			local index = 1
 
 			while index <= #runs do
-				if runs[index].level >= level then
+				if assert(runs[index]).level >= level then
 					local last = index
 
-					while last < #runs and runs[last + 1].level >= level do
-						last = last + 1
+					while last < #runs do
+						if assert(runs[last + 1]).level < level then
+							break
+						end
+
+						last += 1
 					end
 
 					local left, right = index, last
@@ -229,7 +243,7 @@ function bidi.paragraph(text, characters, opts)
 
 					index = last + 1
 				else
-					index = index + 1
+					index += 1
 				end
 			end
 		end

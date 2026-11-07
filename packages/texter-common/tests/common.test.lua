@@ -131,7 +131,7 @@ end)
 
 test.skipIf(fontPath == nil)("reads the family a font file says it is", function()
 	local file = assert(io.open(assert(fontPath), "rb"))
-	local content = file:read("*all")
+	local content = file:read("*a")
 
 	file:close()
 

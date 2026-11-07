@@ -7,6 +7,8 @@ local ffi = require("ffi")
 
 local ok, win32 = pcall(require, "texter-win32")
 
+---@cast win32 texter.win32
+
 local FONTS = {
 	"C:/Windows/Fonts/arial.ttf",
 	"C:/Windows/Fonts/segoeui.ttf",
@@ -30,7 +32,6 @@ end
 local fontPath = aFont()
 
 --- A font of this machine that draws Arabic, which not every font of it does.
----@return texter.win32.Face? face
 local function anArabicFace()
 	if not ok then
 		return nil
@@ -39,8 +40,12 @@ local function anArabicFace()
 	for _, path in ipairs(FONTS) do
 		local made, face = pcall(win32.face, path, 0)
 
-		if made and face and face:hasGlyph(0x645) and face:hasGlyph(0x62D) then
-			return face
+		if made and face then
+			---@cast face texter.win32.Face
+
+			if face:hasGlyph(0x645) and face:hasGlyph(0x62D) then
+				return face
+			end
 		end
 	end
 end
@@ -99,7 +104,7 @@ local function rowInk(ink, row)
 	local sum = 0
 
 	for column = 0, ink.width - 1 do
-		sum = sum + assert(ink.pixels)[row * ink.width + column]
+		sum += assert(ink.pixels)[row * ink.width + column]
 	end
 
 	return sum
@@ -138,8 +143,8 @@ local function snap(ink)
 		for column = 0, ink.width - 1 do
 			local value = pixels[row * ink.width + column]
 
-			mass = mass + (ink.left + column + 0.5) * value
-			weight = weight + value
+			mass += (ink.left + column + 0.5) * value
+			weight += value
 
 			if value % 4 ~= 0 then
 				isCoarse = false
@@ -153,8 +158,8 @@ local function snap(ink)
 		left = ink.left,
 		top = ink.top,
 		isCoarse = isCoarse,
-		mass = weight > 0 and mass / weight or 0.0,
-		pixels = count > 0 and ffi.string(pixels, count) or "",
+		mass = weight > 0 ? mass / weight : 0.0,
+		pixels = count > 0 ? ffi.string(pixels, count) : "",
 	}
 end
 
@@ -228,7 +233,7 @@ test.skipIf(not ok or fontPath == nil)("shapes a line into the glyphs it is draw
 		test.truthy(glyph.cluster >= 0 and glyph.cluster < #line.text,
 			string.format("glyph %d came from a byte of the line: %d", index, glyph.cluster))
 
-		pen = pen + glyph.advance
+		pen += glyph.advance
 
 		_ = index
 	end
@@ -323,7 +328,6 @@ local EMOJI = {
 	"C:/Windows/Fonts/arial.ttf",
 }
 
----@return texter.win32.Face? face
 local function anEmojiFace()
 	if not ok then
 		return nil
@@ -337,8 +341,12 @@ local function anEmojiFace()
 
 			local made, face = pcall(win32.face, path, 0)
 
-			if made and face and face:hasGlyph(0x1F600) and face:hasGlyph(0x1F680) then
-				return face
+			if made and face then
+				---@cast face texter.win32.Face
+
+				if face:hasGlyph(0x1F600) and face:hasGlyph(0x1F680) then
+					return face
+				end
 			end
 		end
 	end
@@ -396,7 +404,7 @@ test.skipIf(arabicFace == nil)("shapes Arabic in the order it is drawn in", func
 	local pen = 0.0
 
 	for _, glyph in ipairs(line.glyphs) do
-		pen = pen + glyph.advance
+		pen += glyph.advance
 	end
 
 	test.truthy(math.abs(line.width - pen) < 1.5, "and the line is as wide as its glyphs put together")
@@ -414,7 +422,7 @@ test.skipIf(arabicFace == nil)("arranges a line of two directions, which is what
 			test.truthy(run.last >= run.first, "every run is a stretch of the line")
 
 			if run.rtl then
-				backwards = backwards + 1
+				backwards += 1
 			end
 		end
 
@@ -424,7 +432,7 @@ test.skipIf(arabicFace == nil)("arranges a line of two directions, which is what
 	end)
 
 test.skipIf(emojiFace == nil)("draws an emoji, which is a character outside the basic plane", function()
-	local face = assert(emojiFace)
+	local face = assert(emojiFace) ---@cast face texter.win32.Face
 
 	test.truthy(face:hasGlyph(0x1F600),
 		"it says it draws a grinning face, which is a character of two UTF-16 units")
@@ -438,7 +446,7 @@ test.skipIf(emojiFace == nil)("draws an emoji, which is a character outside the 
 end)
 
 test.skipIf(emojiFace == nil)("counts an emoji in bytes of the line, which is four of them", function()
-	local face = assert(emojiFace)
+	local face = assert(emojiFace) ---@cast face texter.win32.Face
 	local line = win32.shape(face, "😀😀", 24)
 	local at = starts("😀😀")
 
@@ -452,14 +460,14 @@ test.skipIf(emojiFace == nil)("counts an emoji in bytes of the line, which is fo
 	local pen = 0.0
 
 	for _, glyph in ipairs(line.glyphs) do
-		pen = pen + glyph.advance
+		pen += glyph.advance
 	end
 
 	test.truthy(math.abs(line.width - pen) < 1.5, "and the line is as wide as its glyphs put together")
 end)
 
 test.skipIf(emojiFace == nil)("puts a caret between two emoji rather than inside one", function()
-	local face = assert(emojiFace)
+	local face = assert(emojiFace) ---@cast face texter.win32.Face
 	local line = win32.shape(face, "😀😀", 24)
 	local first = win32.penOf(line, 0)
 	local second = win32.penOf(line, 4)
@@ -476,7 +484,7 @@ test.skipIf(emojiFace == nil)("puts a caret between two emoji rather than inside
 end)
 
 test.skipIf(emojiFace == nil)("shapes a sequence of emoji joined by a zero width joiner", function()
-	local face = assert(emojiFace)
+	local face = assert(emojiFace) ---@cast face texter.win32.Face
 	local text = "👩‍🚀"
 	local line = win32.shape(face, text, 24)
 	local at = starts(text)

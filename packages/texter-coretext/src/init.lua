@@ -143,26 +143,38 @@ local core = ffi.load(framework .. "CoreFoundation.framework/CoreFoundation")
 local coreText = ffi.load(framework .. "CoreText.framework/CoreText")
 local coreGraphics = ffi.load(framework .. "CoreGraphics.framework/CoreGraphics")
 
+---@class texter.coretext
+---@field available fun(): boolean
+---@field why fun(): string?
+---@field face fun(path: string, index: number?): texter.coretext.Face?, string?
+---@field faceBytes fun(content: string, index: number?): texter.coretext.Face?, string?
+---@field shape fun(face: texter.coretext.Face, text: string, pixelHeight: number, opts: texter.ShapeOpts?): texter.Line
+---@field ink fun(face: texter.coretext.Face, glyph: number, pixelHeight: number): texter.Ink
+---@field metrics fun(face: texter.coretext.Face, pixelHeight: number): number, number, number
+---@field penOf fun(line: texter.Line, byte: number): number
+---@field byteAt fun(line: texter.Line, x: number): number
+---@field provider texter.Provider
+
 local coretext = {}
 
----@class texter.coretext.Face
+-- The size a face is asked about a character at, where a caller does not say: whether a font draws
+-- a character is not a question about a size.
+local DEFAULT_HEIGHT = 16
+
+---@class texter.coretext.Face: texter.Face
 ---@field path string
 ---@field index number
 ---@field descriptor CTFontDescriptorRef
 ---@field fonts table<number, CTFontRef> # One for each pixel height it has been asked for
 ---@field scale number # The size a font is made at for one pixel of line height
-
--- The size a face is asked about a character at, where a caller does not say: whether a font draws
--- a character is not a question about a size.
-local DEFAULT_HEIGHT = 16
----@field private canvas ffi.cdata*? # The bitmap context glyphs are drawn into, kept
----@field private canvasPixels ffi.cdata*? # What it draws into, kept
+---@field private canvas CGContextRef? # The bitmap context glyphs are drawn into, kept
+---@field private canvasPixels ffi.array<ffi.uint8_t>? # What it draws into, kept
 ---@field private canvasWidth number # How wide that is, which is what a row of it is
 ---@field private canvasHeight number
 ---@field private room number # How many pixels the compact copy of a glyph holds
----@field private stack ffi.cdata*?
----@field private space ffi.cdata*? # The grey colour space every canvas of this face is made in
----@field private colour ffi.cdata*? # What a glyph is drawn in
+---@field private stack ffi.array<ffi.uint8_t>?
+---@field private space CGColorSpaceRef? # The grey colour space every canvas of this face is made in
+---@field private colour CGColorRef? # What a glyph is drawn in
 local Face = {}
 
 ---@return boolean
@@ -181,7 +193,6 @@ end
 
 ---@param bytes string
 ---@param encoding number
----@return CFStringRef
 local function stringOf(bytes, encoding)
 	if encoding == ENCODING_UTF8 then
 		return core.CFStringCreateWithBytes(nil, ffi.cast("const unsigned char *", bytes), #bytes, encoding, 0)
@@ -195,8 +206,14 @@ end
 -- arrays the collector pays for. What they hold is read before the next run rather than kept.
 local room = 0
 
----@type ffi.cdata*
-local glyphBuffer, positionBuffer, indexBuffer = nil, nil, nil
+---@type ffi.array<CGGlyph>
+local glyphBuffer = ffi.new("CGGlyph[0]")
+
+---@type ffi.array<CGPoint>
+local positionBuffer = ffi.new("CGPoint[0]")
+
+---@type ffi.array<CFIndex>
+local indexBuffer = ffi.new("CFIndex[0]")
 
 ---@param count number
 local function grow(count)
@@ -353,7 +370,7 @@ function Face:metrics(pixelHeight)
 
 	-- What is asked for is the height of a line, so what comes back is scaled to it: the font was
 	-- made at a size where that is what it comes to, and what is left over is the leading.
-	return ascent, -descent, leading > 0 and leading or 0, line
+	return ascent, -descent, leading > 0 ? leading : 0, line
 end
 
 --- The glyph a codepoint is in this font, or nought where it is not one of its own.
@@ -370,7 +387,8 @@ end
 ---@param pixelHeight number?
 ---@return number
 function Face:glyphFor(codepoint, pixelHeight)
-	local font = self:font(pixelHeight or DEFAULT_HEIGHT)
+	local height = pixelHeight or DEFAULT_HEIGHT
+	local font = self:font(height)
 	local characters = ffi.new("UniChar[2]")
 	local count = 1
 
@@ -493,10 +511,10 @@ end
 ---@param width number
 ---@param height number
 ---@return CGContextRef context
----@return ffi.cdata* pixels
+---@return ffi.array<ffi.uint8_t> pixels
 function Face:canvasFor(width, height)
 	if self.canvas ~= nil and width <= self.canvasWidth and height <= self.canvasHeight then
-		return self.canvas, self.canvasPixels
+		return self.canvas, assert(self.canvasPixels)
 	end
 
 	local wide = math.max(width, self.canvasWidth * 2)
@@ -539,7 +557,7 @@ function Face:ink(codepoint, pixelHeight)
 	return self:inkOf(self:glyphFor(codepoint, pixelHeight), pixelHeight)
 end
 
----@param ink texter.Ink
+---@param _ink texter.Ink
 function Face:freeInk(_ink)
 end
 
@@ -548,7 +566,7 @@ end
 ---@param face texter.coretext.Face
 ---@param text string
 ---@param pixelHeight number
----@param opts texter.ShapeOpts?
+---@param _opts texter.ShapeOpts?
 ---@return texter.Line
 function coretext.shape(face, text, pixelHeight, _opts)
 	local font = face:font(pixelHeight)
@@ -582,7 +600,7 @@ function coretext.shape(face, text, pixelHeight, _opts)
 	---@param unit number
 	---@return number
 	local function byteOf(unit)
-		local at = unit >= 0 and bytes[unit] or nil
+		local at = unit >= 0 ? bytes[unit] : nil
 
 		return (at or (#text + 1)) - 1
 	end
@@ -618,7 +636,7 @@ function coretext.shape(face, text, pixelHeight, _opts)
 			first = byteOf(low) + 1,
 			last = byteOf(high) + 1,
 			rtl = rtl,
-			level = rtl and 1 or 0,
+			level = rtl ? 1 : 0,
 		}
 
 		for at = 0, glyphCount - 1 do
@@ -641,7 +659,7 @@ function coretext.shape(face, text, pixelHeight, _opts)
 	for index = 1, #glyphs do
 		local next = glyphs[index + 1]
 
-		glyphs[index].advance = (next and next.x or width) - glyphs[index].x
+		glyphs[index].advance = (next?.x or width) - glyphs[index].x
 	end
 
 	core.CFRelease(line)
@@ -650,7 +668,7 @@ function coretext.shape(face, text, pixelHeight, _opts)
 	core.CFRelease(name)
 	core.CFRelease(cfText)
 
-	local rtl = #placed > 0 and placed[1].rtl or false
+	local rtl = #placed > 0 ? assert(placed[1]).rtl : false
 
 	return { glyphs = glyphs, width = width, rtl = rtl, runs = placed, text = text }
 end
@@ -683,7 +701,7 @@ function coretext.penOf(line, byte)
 			return pen
 		end
 
-		pen = pen + glyph.advance
+		pen += glyph.advance
 	end
 
 	return line.width
@@ -700,28 +718,52 @@ function coretext.byteAt(line, x)
 			return glyph.cluster
 		end
 
-		pen = pen + glyph.advance
+		pen += glyph.advance
 	end
 
 	return #line.text + 1
 end
 
--- What a UI library asks a reader of fonts for -- see `wonderland.font.Provider`: the faces, and the
--- shaping a screen that draws its lines as glyphs rather than characters needs.
----@type wonderland.font.Provider
+-- What a UI library asks a reader of fonts for -- see `texter.Provider`: the faces, and the shaping
+-- a screen that draws its lines as glyphs rather than characters needs.
+---@param path string
+---@param index number?
+---@return texter.coretext.Face? face
+---@return string? err
+local function providerOpen(path, index)
+	return coretext.face(path, index)
+end
+
+---@param content string
+---@param index number?
+---@return texter.coretext.Face? face
+---@return string? err
+local function providerOpenBytes(content, index)
+	return coretext.faceBytes(content, index)
+end
+
+---@param face texter.coretext.Face
+---@param text string
+---@param pixelHeight number
+---@param opts texter.ShapeOpts?
+local function providerShape(face, text, pixelHeight, opts)
+	return coretext.shape(face, text, pixelHeight, opts)
+end
+
+---@param face texter.coretext.Face
+---@param glyph number
+---@param pixelHeight number
+---@param _opts texter.InkOpts?
+local function providerInk(face, glyph, pixelHeight, _opts)
+	return coretext.ink(face, glyph, pixelHeight)
+end
+
+---@type texter.Provider
 coretext.provider = {
-	open = function(path, index)
-		return coretext.face(path, index)
-	end,
-	openBytes = function(content, index)
-		return coretext.faceBytes(content, index)
-	end,
-	shape = function(face, text, pixelHeight, opts)
-		return coretext.shape(face, text, pixelHeight, opts)
-	end,
-	ink = function(face, glyph, pixelHeight)
-		return coretext.ink(face, glyph, pixelHeight)
-	end,
+	open = providerOpen,
+	openBytes = providerOpenBytes,
+	shape = providerShape,
+	ink = providerInk,
 }
 
 return coretext

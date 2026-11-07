@@ -65,6 +65,12 @@ ffi.cdef [[
 		void *palette;
 	} FT_Bitmap;
 
+	typedef struct {
+		short height, width;
+		long size;
+		long x_ppem, y_ppem;
+	} FT_Bitmap_Size;
+
 	typedef struct FT_FaceRec_ {
 		long num_faces;
 		long face_index;
@@ -111,6 +117,7 @@ ffi.cdef [[
 	int FT_Init_FreeType(FT_Library *library);
 	int FT_Done_FreeType(FT_Library library);
 	int FT_New_Face(FT_Library library, const char *path, long index, FT_Face *face);
+	int FT_Select_Size(FT_Face face, int index);
 	int FT_New_Memory_Face(FT_Library library, const unsigned char *file_base, long file_size, long index,
 		FT_Face *face);
 	int FT_Done_Face(FT_Face face);
@@ -123,33 +130,6 @@ ffi.cdef [[
 	int FT_Outline_Transform(const FT_Outline *outline, const void *matrix);
 	int FT_Outline_Translate(const FT_Outline *outline, long x, long y);
 ]]
-
---- A face as FreeType holds it, which the language server cannot see.
----@class texter.freetype.ffi.Face: ffi.cdata*
----@field num_glyphs number
----@field units_per_EM number
----@field ascender number
----@field descender number
----@field height number
----@field glyph texter.freetype.ffi.Slot
-
----@class texter.freetype.ffi.Slot: ffi.cdata*
----@field advance texter.freetype.ffi.Vector
----@field bitmap texter.freetype.ffi.Bitmap
----@field bitmap_left number
----@field bitmap_top number
----@field outline ffi.cdata*
-
----@class texter.freetype.ffi.Vector: ffi.cdata*
----@field x number
----@field y number
-
----@class texter.freetype.ffi.Bitmap: ffi.cdata*
----@field rows number
----@field width number
----@field pitch number
----@field buffer ffi.cdata*
----@field pixel_mode number
 
 -- What the libraries are called, in the order they are tried: a machine with the development
 -- package has the first name, and one with only the runtime -- which is what a desktop installs --
@@ -199,26 +179,68 @@ local STACK = 1 << 16
 
 local freetype = {}
 
----@class texter.freetype.Face
+--- A bitmap a fixed-size strike drew, shrunk or grown to the pixels the caller asked for: one byte
+--- per sample, or four for a colour glyph. Bilinear, because an emoji strike is a picture and a
+--- nearest copy of one at a fifth of its size is a field of blocks.
+---@param bytes number
+---@param source ffi.array<ffi.uint8_t>
+---@param sourceWidth number
+---@param sourceHeight number
+---@param width number
+---@param height number
+---@param into ffi.array<ffi.uint8_t>
+local function scalePixels(bytes, source, sourceWidth, sourceHeight, width, height, into)
+	for y = 0, height - 1 do
+		local sy = (y + 0.5) * sourceHeight / height - 0.5
+		local y0 = math.max(0, math.min(sourceHeight - 1, math.floor(sy)))
+		local y1 = math.min(sourceHeight - 1, y0 + 1)
+		local fy = math.max(0, math.min(1, sy - y0))
+
+		for x = 0, width - 1 do
+			local sx = (x + 0.5) * sourceWidth / width - 0.5
+			local x0 = math.max(0, math.min(sourceWidth - 1, math.floor(sx)))
+			local x1 = math.min(sourceWidth - 1, x0 + 1)
+			local fx = math.max(0, math.min(1, sx - x0))
+			local at = (y * width + x) * bytes
+
+			for channel = 0, bytes - 1 do
+				local top = source[(y0 * sourceWidth + x0) * bytes + channel] * (1 - fx)
+					+ source[(y0 * sourceWidth + x1) * bytes + channel] * fx
+				local bottom = source[(y1 * sourceWidth + x0) * bytes + channel] * (1 - fx)
+					+ source[(y1 * sourceWidth + x1) * bytes + channel] * fx
+
+				into[at + channel] = math.floor(top * (1 - fy) + bottom * fy + 0.5)
+			end
+		end
+	end
+end
+
+---@class texter.freetype.Face: texter.Face
 ---@field path string
 ---@field index number
----@field handle texter.freetype.ffi.Face
+---@field handle FT_Face
 ---@field data string? # The font's bytes, where it was read from memory rather than from `path`
----@field buffer ffi.cdata*? # Those bytes in memory FreeType reads, which has to outlive the face
+---@field buffer ffi.array<ffi.uint8_t>? # Those bytes in memory FreeType reads, which has to outlive the face
+---@field strikeScale number? # What a fixed-size strike is scaled by to reach the asked pixel height
+---@field scaledRoom number? # How much room the scaled copy of a strike holds
+---@field scaledStack ffi.array<ffi.uint8_t>?
 ---@field family string? # What the font calls itself, where it says
 ---@field style string?
 ---@field private height number # The pixel height the face is at, which is what it is not asked twice
 ---@field private room number # How many pixels the ink buffer holds, grown as glyphs need
----@field private stack ffi.cdata*
+---@field private stack ffi.array<ffi.uint8_t>
 local Face = {}
 Face.__index = Face
 
-local library, reason = nil, nil
+---@type ffi.namespace*?
+local library = nil
+local reason = nil
 
 for _, name in ipairs(NAMES) do
 	local ok, loaded = pcall(ffi.load, name)
 
 	if ok then
+		---@cast loaded ffi.namespace*
 		library, freetype.library = loaded, name
 		break
 	end
@@ -242,13 +264,11 @@ end
 
 --- FreeType itself, made when the first face is opened and kept: it is the machine's own state, and
 --- a program that draws text draws it until it ends.
----@return ffi.cdata* library
 local function instance()
 	if freetype.handle == nil then
-		assert(library, freetype.why())
-
+		local api = assert(library, freetype.why())
 		local made = ffi.new("FT_Library[1]")
-		local failure = library.FT_Init_FreeType(made)
+		local failure = api.FT_Init_FreeType(made)
 
 		if failure ~= 0 then
 			reason = "FreeType could not be started (error " .. failure .. ")"
@@ -266,31 +286,28 @@ end
 --- A pixel height in a screen is how many pixels a *line* of text takes, and what FreeType is given
 --- is the size of the em: they are two numbers the font itself relates, and a reader that took one
 --- for the other would draw a screen of text a third larger than it was asked for.
----@param handle texter.freetype.ffi.Face
+---@param handle FT_Face
 ---@param pixelHeight number
----@return number
 local function scaleFor(handle, pixelHeight)
 	local line = handle.ascender - handle.descender
 
-	return line > 0 and pixelHeight / line or pixelHeight / (handle.units_per_EM ~= 0 and handle.units_per_EM or 1000)
+	return line > 0 ? pixelHeight / line : pixelHeight / (handle.units_per_EM ~= 0 ? handle.units_per_EM : 1000)
 end
 
 --- The em a pixel height comes to, in sixty-fourths of a pixel.
----@param handle texter.freetype.ffi.Face
+---@param handle FT_Face
 ---@param pixelHeight number
----@return number
 function freetype.em(handle, pixelHeight)
 	return scaleFor(handle, pixelHeight) * handle.units_per_EM
 end
 
 --- A face from a handle FreeType has already made: the names it calls itself, the character map a
 --- codepoint is looked up in, and the buffers an ink is copied through.
----@param handle texter.freetype.ffi.Face
+---@param handle FT_Face
 ---@param path string
 ---@param index number?
 ---@param data string?
----@param buffer ffi.cdata*?
----@return texter.freetype.Face
+---@param buffer ffi.array<ffi.uint8_t>?
 local function fromHandle(handle, path, index, data, buffer)
 	local face = setmetatable({
 		path = path,
@@ -315,7 +332,9 @@ local function fromHandle(handle, path, index, data, buffer)
 
 	-- A font states its glyphs in more than one character map, and which of them is asked for
 	-- decides whether a codepoint is the glyph it looks like: the Unicode one is what it means.
-	library.FT_Select_Charmap(handle, UNICODE)
+	local api = assert(library, freetype.why())
+
+	api.FT_Select_Charmap(handle, UNICODE)
 
 	return face
 end
@@ -329,8 +348,9 @@ function freetype.open(path, index)
 		return nil, freetype.why()
 	end
 
+	local api = assert(library, freetype.why())
 	local handle = ffi.new("FT_Face[1]")
-	local failure = library.FT_New_Face(instance(), path, index or 0, handle)
+	local failure = api.FT_New_Face(instance(), path, index or 0, handle)
 
 	if failure ~= 0 or handle[0] == nil then
 		return nil, string.format("%s is not a font FreeType can read (error %d)", path, failure)
@@ -353,8 +373,9 @@ function freetype.openBytes(content, index)
 	local buffer = ffi.new("unsigned char[?]", #content)
 	ffi.copy(buffer, content, #content)
 
+	local api = assert(library, freetype.why())
 	local handle = ffi.new("FT_Face[1]")
-	local failure = library.FT_New_Memory_Face(instance(), buffer, #content, index or 0, handle)
+	local failure = api.FT_New_Memory_Face(instance(), buffer, #content, index or 0, handle)
 
 	if failure ~= 0 or handle[0] == nil then
 		return nil, string.format("the embedded font is not a font FreeType can read (error %d)", failure)
@@ -374,10 +395,40 @@ end
 ---@param self texter.freetype.Face
 ---@param pixelHeight number
 function Face:size(pixelHeight)
-	local em = freetype.em(self.handle, pixelHeight)
+	local handle = self.handle
+	local api = assert(library, freetype.why())
+	local fixed = tonumber(handle.num_fixed_sizes) > 0
+		and (tonumber(handle.face_flags) & 1) == 0
+
+	if fixed then
+		if self.height ~= pixelHeight then
+			local sizes = ffi.cast("FT_Bitmap_Size *", handle.available_sizes)
+			local best, bestDistance = 0, nil
+
+			for index = 0, tonumber(handle.num_fixed_sizes) - 1 do
+				local ppem = tonumber(sizes[index].y_ppem) / 64
+				local distance = math.abs(ppem - pixelHeight)
+
+				if bestDistance == nil or distance < bestDistance then
+					best, bestDistance = index, distance
+				end
+			end
+
+			api.FT_Select_Size(handle, best)
+
+			local ppem = tonumber(sizes[best].y_ppem) / 64
+			self.strikeScale = ppem > 0 ? pixelHeight / ppem : 1
+			self.height = pixelHeight
+		end
+
+		return self.strikeScale
+	end
+
+	self.strikeScale = nil
+	local em = freetype.em(handle, pixelHeight)
 
 	if self.height ~= pixelHeight then
-		library.FT_Set_Char_Size(self.handle, 0, math.floor(em * 64 + 0.5), 72, 72)
+		api.FT_Set_Char_Size(handle, 0, math.floor(em * 64 + 0.5), 72, 72)
 
 		self.height = pixelHeight
 	end
@@ -417,7 +468,7 @@ function Face:metrics(pixelHeight)
 	local descent = handle.descender * scale
 	local gap = handle.height * scale - (ascent - descent)
 
-	return ascent, descent, gap > 0 and gap or 0
+	return ascent, descent, gap > 0 ? gap : 0
 end
 
 --- How far the pen moves for a character, in pixels at this size.
@@ -427,9 +478,15 @@ end
 function Face:advance(codepoint, pixelHeight)
 	local glyph = self:glyphFor(codepoint, pixelHeight)
 
-	library.FT_Load_Glyph(self.handle, glyph, LOAD_DEFAULT + LOAD_TARGET_LIGHT)
+	assert(library, freetype.why()).FT_Load_Glyph(self.handle, glyph, LOAD_DEFAULT + LOAD_TARGET_LIGHT)
 
-	return tonumber(self.handle.glyph.advance.x) / 64
+	local advance = tonumber(self.handle.glyph.advance.x) / 64
+
+	if self.strikeScale ~= nil and self.strikeScale ~= 1 then
+		advance = advance * self.strikeScale
+	end
+
+	return advance
 end
 
 --- A glyph with nothing to draw: what a space, a mark a shaper places by an offset, and a glyph a
@@ -447,11 +504,11 @@ local NOTHING = { width = 0, height = 0, left = 0, top = 0 }
 --- green, red and alpha, each of them multiplied by the alpha, so that what is drawn over what is
 --- under it needs no dividing.
 ---@param mode number
----@param buffer ffi.cdata* # The bitmap's bytes, as the platform handed them over
+---@param buffer ffi.ptr<ffi.uint8_t> # The bitmap's bytes, as the platform handed them over
 ---@param pitch number # How far one row of them is, which is not the width for anything padded
 ---@param width number
 ---@param height number
----@param into ffi.cdata* # Where it is written
+---@param into ffi.array<ffi.uint8_t> # Where it is written
 ---@return boolean colour # Whether four bytes a pixel were written rather than one
 function freetype.pixels(mode, buffer, pitch, width, height, into)
 	if mode == PIXEL_MODE_BGRA then
@@ -474,9 +531,9 @@ function freetype.pixels(mode, buffer, pitch, width, height, into)
 			for column = 0, width - 1 do
 				-- A bit a pixel, most significant first, which is how a monochrome bitmap is read.
 				local byte = bits[math.floor(column / 8)]
-				local bit = math.floor(byte / 2 ^ (7 - column % 8)) % 2
+				local set = math.floor(byte / 2 ^ (7 - column % 8)) % 2
 
-				into[out + column] = bit == 1 and 255 or 0
+				into[out + column] = set == 1 ? 255 : 0
 			end
 		end
 
@@ -511,7 +568,9 @@ function Face:inkOf(glyph, pixelHeight)
 	-- outline is is a shape the font keeps for a reader that cannot paint, and what a reader that
 	-- can hands back is the picture. Nothing FreeType draws by itself is the picture, so what paints
 	-- one is `texter-freetype.paint`.
-	if paint.has(library, self.handle, glyph) then
+	local api = assert(library, freetype.why())
+
+	if paint.has(api, self.handle, glyph) then
 		local painted = self:paintOf(glyph, pixelHeight)
 
 		if painted.width > 0 then
@@ -521,7 +580,7 @@ function Face:inkOf(glyph, pixelHeight)
 
 	-- One call for the whole of the rest: the glyph is asked for the colours it has, which a font
 	-- that has none ignores, and drawn, which a glyph with a picture of its own does not need.
-	if library.FT_Load_Glyph(self.handle, glyph,
+	if api.FT_Load_Glyph(self.handle, glyph,
 		LOAD_DEFAULT + LOAD_RENDER + LOAD_COLOR + LOAD_TARGET_LIGHT) ~= 0 then
 		return NOTHING
 	end
@@ -544,15 +603,38 @@ function Face:inkOf(glyph, pixelHeight)
 	end
 
 	local colour = freetype.pixels(mode, bitmap.buffer, tonumber(bitmap.pitch), width, height, self.stack)
+	local pixels = self.stack
+	local left = tonumber(slot.bitmap_left)
+	local top = -tonumber(slot.bitmap_top)
+
+	-- A bitmap-only face has no size of its own to set: the closest strike was selected, and what
+	-- it drew is scaled to the size the screen asked for. The offsets move with the picture.
+	if self.strikeScale ~= nil and self.strikeScale ~= 1 then
+		local scaledWidth = math.max(1, math.floor(width * self.strikeScale + 0.5))
+		local scaledHeight = math.max(1, math.floor(height * self.strikeScale + 0.5))
+		local room = scaledWidth * scaledHeight * bytes
+
+		if room > (self.scaledRoom or 0) then
+			self.scaledRoom = room
+			self.scaledStack = ffi.new("unsigned char[?]", room)
+		end
+
+		scalePixels(bytes, pixels, width, height, scaledWidth, scaledHeight, assert(self.scaledStack))
+
+		width, height = scaledWidth, scaledHeight
+		left = math.floor(left * self.strikeScale + 0.5)
+		top = math.floor(top * self.strikeScale + 0.5)
+		pixels = self.scaledStack
+	end
 
 	-- Where the ink sits: FreeType says how far the top of the bitmap is above the baseline, and
 	-- what a caller wants is how far down the screen it is.
 	return {
 		width = width,
 		height = height,
-		left = tonumber(slot.bitmap_left),
-		top = -tonumber(slot.bitmap_top),
-		pixels = self.stack,
+		left = left,
+		top = top,
+		pixels = pixels,
 		colour = colour or nil,
 	}
 end
@@ -563,7 +645,8 @@ end
 ---@param pixelHeight number
 ---@return texter.Ink
 function Face:paintOf(glyph, pixelHeight)
-	local left, top, width, height = paint.boxOf(library, self.handle, glyph, pixelHeight)
+	local api = assert(library, freetype.why())
+	local left, top, width, height = paint.boxOf(api, self.handle, glyph, pixelHeight)
 
 	if width <= 0 or height <= 0 then
 		return NOTHING
@@ -576,7 +659,7 @@ function Face:paintOf(glyph, pixelHeight)
 		self.stack = ffi.new("unsigned char[?]", self.room)
 	end
 
-	if not paint.into(library, self.handle, glyph, self.stack, left, top, width, height) then
+	if not paint.into(api, self.handle, glyph, self.stack, left, top, width, height) then
 		return NOTHING
 	end
 
@@ -615,14 +698,15 @@ function Face:table(tag)
 	assert(#tag == 4, "A sfnt tag is four bytes")
 
 	local length = ffi.new("unsigned long[1]")
+	local api = assert(library, freetype.why())
 
-	if library.FT_Load_Sfnt_Table(self.handle, tonumber(ffi.cast("uint32_t", ffi.new("char[4]", tag:reverse()))), 0, nil, length) ~= 0 then
+	if api.FT_Load_Sfnt_Table(self.handle, tonumber(ffi.cast("uint32_t", ffi.new("char[4]", tag:reverse()))), 0, nil, length) ~= 0 then
 		return nil
 	end
 
 	local buffer = ffi.new("unsigned char[?]", tonumber(length[0]))
 
-	if library.FT_Load_Sfnt_Table(self.handle, tonumber(ffi.cast("uint32_t", ffi.new("char[4]", tag:reverse()))), 0, buffer,
+	if api.FT_Load_Sfnt_Table(self.handle, tonumber(ffi.cast("uint32_t", ffi.new("char[4]", tag:reverse()))), 0, buffer,
 			length) ~= 0 then
 		return nil
 	end

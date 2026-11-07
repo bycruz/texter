@@ -58,6 +58,8 @@ if path == nil then
 	os.exit(1)
 end
 
+---@cast path string
+
 local face = assert(texter.face(path))
 
 print(string.format("font: %s", path))
