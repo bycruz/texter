@@ -219,12 +219,15 @@ local function fromFont(javaFont, content, path, index, buffer)
 	}, Face)
 end
 
---- Reads a font file.
+--- Reads a font file. A variable font -- Android's Roboto is one file for every weight -- is set to
+--- `opts.weight` on its weight axis, which is what makes it draw bold; a font with no such axis
+--- draws as it is.
 ---@param path string
 ---@param index number?
+---@param opts { weight: number? }?
 ---@return texter.android.Face? face
 ---@return string? err
-function font.open(path, index)
+function font.open(path, index, opts)
 	local file = io.open(path, "rb")
 	if file == nil then
 		return nil, "Could not read " .. path
@@ -232,11 +235,20 @@ function font.open(path, index)
 	local content = file:read("*a")
 	file:close()
 
+	local weight = opts ~= nil and tonumber(opts.weight) or nil
+
 	local made, err = jni.frame(function()
 		local builder = jni.new("android/graphics/fonts/Font$Builder", "(Ljava/io/File;)V",
 			jni.new("java/io/File", "(Ljava/lang/String;)V", jni.string(path)))
 		builder = jni.call(builder, "android/graphics/fonts/Font$Builder", "setTtcIndex",
 			"(I)Landroid/graphics/fonts/Font$Builder;", "object", index or 0)
+		if weight ~= nil and weight ~= 400 then
+			builder = jni.call(builder, "android/graphics/fonts/Font$Builder", "setFontVariationSettings",
+				"(Ljava/lang/String;)Landroid/graphics/fonts/Font$Builder;", "object",
+				jni.string(string.format("'wght' %d", math.floor(weight))))
+			builder = jni.call(builder, "android/graphics/fonts/Font$Builder", "setWeight",
+				"(I)Landroid/graphics/fonts/Font$Builder;", "object", math.max(1, math.min(1000, math.floor(weight))))
+		end
 		local javaFont = jni.call(builder, "android/graphics/fonts/Font$Builder", "build",
 			"()Landroid/graphics/fonts/Font;", "object")
 		return fromFont(javaFont, content, path, index or 0, nil)
