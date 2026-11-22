@@ -16,7 +16,8 @@
 -- on macOS. What this package is, is the one API over whatever the machine has, and what it costs a
 -- bundle is nothing at all.
 --
---   linux, android  texter-freetype    FreeType, HarfBuzz, fribidi
+--   linux           texter-freetype    FreeType, HarfBuzz, fribidi
+--   android         texter-android     Font, TextRunShaper, Canvas through JNI; ICU bidi
 --   windows         texter-win32       Uniscribe and GDI
 --   macOS           texter-coretext    CoreText and CoreGraphics
 --
@@ -37,7 +38,6 @@ local ffi = require("ffi")
 ---@type table<string, string>
 local BACKENDS = {
 	Linux = "texter-freetype",
-	Android = "texter-freetype",
 	Windows = "texter-win32",
 	OSX = "texter-coretext",
 }
@@ -142,7 +142,8 @@ local BACKENDS = {
 
 local texter = {}
 
-local name = BACKENDS[ffi.os]
+-- Android's LuaJIT reports Linux; `jit.android` is what says it is a phone.
+local name = rawget(jit, "android") == true and "texter-android" or BACKENDS[ffi.os]
 local reason = nil
 
 ---@type texter.Backend?

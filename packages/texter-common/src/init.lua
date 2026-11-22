@@ -13,15 +13,18 @@
 --
 -- This package is a leaf: the backends depend on it and it depends on nothing, which is what keeps
 -- them able to be one per platform without any of them being the one that knows about the others.
+local cmap = require("texter-common.cmap")
 local sfnt = require("texter-common.sfnt")
 local utf8 = require("texter-common.utf8")
 
 ---@class texter-common
 ---@field utf8 texter.common.utf8
 ---@field sfnt texter.common.sfnt
+---@field cmap texter.common.cmap
 local common = {
 	utf8 = utf8,
 	sfnt = sfnt,
+	cmap = cmap,
 }
 
 return common

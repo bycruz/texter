@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/lde-org/lde/master/schemas/lde.schema.json",
+  "name": "texter-android",
+  "description": "Text from Android's own framework: Minikin, HarfBuzz and Skia through JNI, ICU bidi",
+  "authors": [
+    "David Cruz <david@bycruz.dev>"
+  ],
+  "version": "0.1.0",
+  "dependencies": {
+    "texter-common": {
+      "path": "../texter-common"
+    },
+    "androidapi": {
+      "version": "^0.1.2"
+    }
+  },
+  "devDependencies": {
+    "lde-test": {
+      "git": "https://github.com/lde-org/lde"
+    }
+  }
+}

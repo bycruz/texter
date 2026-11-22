@@ -27,7 +27,8 @@ None of that is written here, and none of it is a package a caller has to find: 
 
 | Platform | Package | What it uses |
 | -------- | ------- | ------------ |
-| linux, android | `texter-freetype` | FreeType, HarfBuzz, fribidi |
+| linux | `texter-freetype` | FreeType, HarfBuzz, fribidi |
+| android | `texter-android` | the app framework's `Font`, `TextRunShaper` and `Canvas.drawGlyphs` through JNI, ICU bidi (API 31+) |
 | windows | `texter-win32` | Uniscribe (`usp10`) and GDI (`gdi32`) |
 | macOS | `texter-coretext` | CoreText and CoreGraphics |
 
@@ -37,11 +38,17 @@ what `packages/texter/lde.json` says and what lde does with it:
 ```json
 "features": {
 	"linux": ["texter-freetype"],
-	"android": ["texter-freetype"],
+	"android": ["texter-android"],
 	"windows": ["texter-win32"],
 	"macos": ["texter-coretext"]
 }
 ```
+
+Android does not let an app load its FreeType or HarfBuzz: they are private to the platform. What
+it does let an app use is the framework they sit under, so `texter-android` shapes with Minikin and
+HarfBuzz through `TextRunShaper`, draws with Skia through `Canvas.drawGlyphs`, reads which glyph a
+character is from the font's own `cmap`, and arranges a line with the ICU an app may link. It needs
+Android 12 (API 31), the first release with all of those.
 
 A program on linux installs `texter-freetype` and neither of the other two, and the code that could
 not run where it is running is not in the bundle, not in the lockfile and not on disk. What is left
@@ -123,16 +130,17 @@ It is not an em size, and it is not the size a font file says.
 
 ## It has been run on these
 
-| | linux | windows | macOS |
-| - | ----- | ------- | ----- |
-| machine | Nobara 44 (KDE), x86_64 | Windows 10.0.26200, x86_64 | macOS 14.8.8, x86_64 |
-| `texter` | 3 passed | 3 passed | 3 passed |
-| `texter-common` | 10 passed | 10 passed | 10 passed |
-| `texter-freetype` | 23 passed | – | – |
-| `texter-win32` | – | 14 passed | – |
-| `texter-coretext` | – | – | 14 passed |
-| `examples/shapes` | run | run | run |
-| `bench.lua` | run | run | run |
+| | linux | windows | macOS | android |
+| - | ----- | ------- | ----- | ------- |
+| machine | Nobara 44 (KDE), x86_64 | Windows 10.0.26200, x86_64 | macOS 14.8.8, x86_64 | Pixel 7, Android 17, arm64 |
+| `texter` | 3 passed | 3 passed | 3 passed | – |
+| `texter-common` | 10 passed | 10 passed | 10 passed | – |
+| `texter-freetype` | 23 passed | – | – | – |
+| `texter-win32` | – | 14 passed | – | – |
+| `texter-coretext` | – | – | 14 passed | – |
+| `texter-android` | – | – | – | 14 passed |
+| `examples/shapes` | run | run | run | – |
+| `bench.lua` | run | run | run | – |
 
 A package of another platform's backend skips rather than fails, which is what the skips are.
 
@@ -167,7 +175,7 @@ a machine without one skips those tests rather than failing them.
 | macOS fallback fonts | CoreText puts a font of its own in for a script a face has not got: those glyph ids are not of the face, so their ink is nothing. A caller that draws them opens a face that has them |
 | A line height that is exact on windows | GDI's font mapper rasterises in whole pixels and has no cell for every size: twenty-four pixels is twenty-four, twenty is nineteen, and asking again is what settles on the closest of them |
 | An installed font, by name | a face is a file: what fonts a machine has, and which one is called `Noto Sans`, is `fontconfig` and a font directory walk, which is wonderland's `wonderland.font.scan` |
-| Phones | a phone reports itself as linux or as iOS, and it is the linux backend that would run on android; iOS has no backend at all, which is what `why()` says there. Neither has been run on a phone |
+| iOS | iOS has no backend, which is what `why()` says there |
 
 ## The packages
 
@@ -176,6 +184,7 @@ a machine without one skips those tests rather than failing them.
 | `packages/texter` | the one API over whatever the machine has, and the classes every backend answers with |
 | `packages/texter-common` | reading a string as characters and where each of them starts, and reading a font file's own name table. A leaf: no dependencies, and both backends depend on it so that a caret lands in the same place on every platform |
 | `packages/texter-freetype` | FreeType, HarfBuzz and fribidi through ffi |
+| `packages/texter-android` | Android's text framework through JNI, and ICU's bidi through ffi |
 | `packages/texter-win32` | Uniscribe and GDI through ffi |
 | `packages/texter-coretext` | CoreText and CoreGraphics through ffi |
 
@@ -189,6 +198,16 @@ lde test -C packages/texter           # the API and the backend its platform pic
 lde test -C packages/texter-freetype  # the machine's own text, if this machine is linux
 lde test -C packages/texter-win32     # ... if it is windows
 lde test -C packages/texter-coretext  # ... if it is macOS
+```
+
+`texter-android` runs inside an app, so its tests run on a phone: `examples/android-tests` is an app
+that bundles them and writes each result to logcat.
+
+```bash
+cd examples/android-tests && lde install && lde compile --target android-aarch64-apk
+adb install -r texter-android-tests.apk
+adb shell am start -n dev.lde.texter_android_tests/android.app.NativeActivity
+adb logcat -s lde   # PASS / FAIL lines, then RESULT
 ```
 
 A backend's tests run on the platform they are a backend for and nowhere else: they load the

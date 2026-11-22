@@ -1,0 +1,25 @@
+{
+  "$schema": "https://raw.githubusercontent.com/lde-org/lde/master/schemas/lde.schema.json",
+  "name": "texter-android-tests",
+  "description": "Runs texter-android's tests on a phone and writes what came of them to logcat",
+  "authors": [
+    "David Cruz <david@bycruz.dev>"
+  ],
+  "version": "0.1.0",
+  "dependencies": {
+    "texter-android": {
+      "path": "../../packages/texter-android"
+    },
+    "androidapi": {
+      "version": "^0.1.2"
+    }
+  },
+  "devDependencies": {
+    "lde-build": {
+      "git": "https://github.com/lde-org/lde"
+    },
+    "lde-test": {
+      "git": "https://github.com/lde-org/lde"
+    }
+  }
+}
