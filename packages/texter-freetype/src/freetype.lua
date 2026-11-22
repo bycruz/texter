@@ -134,9 +134,7 @@ ffi.cdef [[
 -- What the libraries are called, in the order they are tried: a machine with the development
 -- package has the first name, and one with only the runtime -- which is what a desktop installs --
 -- has the versioned one.
-local NAMES = { "freetype", "libfreetype.so.6", "libfreetype.6.dylib", "freetype.dll",
-
-	"freetype-6.dll", "libfreetype-6.dll" }
+local NAMES = { "freetype", "libfreetype.so.6", "libft2.so", "libfreetype.6.dylib", "freetype.dll", "freetype-6.dll", "libfreetype-6.dll" }
 
 -- FT_ENC_TAG('u','n','i','c'): the character map a codepoint is looked up in.
 local UNICODE = 0x756E6963

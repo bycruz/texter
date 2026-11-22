@@ -96,8 +96,7 @@ local DIRECTION = { ltr = 4, rtl = 5, ttb = 6, btt = 7 }
 ---@field y number
 ---@field advance number # How far the pen moves for it
 
-local NAMES = { "harfbuzz", "libharfbuzz.so.0", "libharfbuzz.0.dylib", "harfbuzz.dll",
-	"libharfbuzz-0.dll" }
+local NAMES = { "harfbuzz", "libharfbuzz.so.0", "libharfbuzz_ng.so", "libharfbuzz.0.dylib", "harfbuzz.dll", "libharfbuzz-0.dll" }
 
 local harfbuzz = {}
 
