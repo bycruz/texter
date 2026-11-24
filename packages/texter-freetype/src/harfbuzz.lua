@@ -11,6 +11,9 @@
 -- and the caller wants what a screen draws.
 local ffi = require("ffi")
 
+-- What a shaped glyph is in a line: the fields of `texter.Glyph` in a struct rather than in a table.
+-- A frame that lays out strings it has not drawn before makes a line for each of them, and a glyph's
+-- struct is a fifth of the table it used to be, which is most of what such a line cost the collector.
 ffi.cdef [[
 	typedef struct hb_blob_t hb_blob_t;
 	typedef struct hb_face_t hb_face_t;
@@ -56,7 +59,17 @@ ffi.cdef [[
 		unsigned int end;
 	} hb_feature_t;
 
+	typedef struct {
+		uint32_t glyph;
+		uint32_t cluster;
+		double x;
+		double y;
+		double advance;
+	} texter_glyph;
+
 	hb_blob_t *hb_blob_create(const char *data, unsigned int length, int mode, void *user_data, void *destroy);
+	hb_blob_t *hb_blob_create_from_file(const char *file_name);
+	unsigned int hb_blob_get_length(hb_blob_t *blob);
 	void hb_blob_destroy(hb_blob_t *blob);
 	hb_face_t *hb_face_create(hb_blob_t *blob, unsigned int index);
 	void hb_face_destroy(hb_face_t *face);
@@ -81,9 +94,10 @@ ffi.cdef [[
 	hb_unicode_funcs_t *hb_unicode_funcs_get_default(void);
 ]]
 
--- HB_MEMORY_MODE_DUPLICATE: what HarfBuzz reads is copied into its own memory, so the bytes a face
--- was opened from need not be kept alive for as long as the shaped font is.
-local DUPLICATE = 0
+-- HB_MEMORY_MODE_READONLY: what HarfBuzz reads is memory the caller keeps, and it neither copies it
+-- nor gives it back. A font is tens of megabytes of tables and a line reads a few of them, so what
+-- a face is opened from is what HarfBuzz should read rather than a copy of it for each size.
+local READONLY = 1
 
 -- HB_DIRECTION_*: which way a run of text is set.
 local DIRECTION = { ltr = 4, rtl = 5, ttb = 6, btt = 7 }
@@ -99,6 +113,12 @@ local DIRECTION = { ltr = 4, rtl = 5, ttb = 6, btt = 7 }
 local NAMES = { "harfbuzz", "libharfbuzz.so.0", "libharfbuzz_ng.so", "libharfbuzz.0.dylib", "harfbuzz.dll", "libharfbuzz-0.dll" }
 
 local harfbuzz = {}
+
+-- The faces HarfBuzz reads, by the file and index they are: a font file is one set of tables
+-- however many weights and sizes of it a screen draws text in, and one mapping of it is what every
+-- one of them reads. Held weakly, so a file nothing draws from any more is given back.
+---@type table<string, ffi.ptr<hb_face_t>>
+local faces = setmetatable({}, { __mode = "v" })
 
 ---@type ffi.namespace*?
 local library = nil
@@ -123,6 +143,18 @@ local buffer = nil
 -- What HarfBuzz answers the count of a buffer in, kept for the same reason.
 local counted = ffi.new("unsigned int[1]")
 
+-- What gives a face and a font back, as plain functions: a finalizer written where the face is
+-- made is a closure, and a function the module already holds is not one per size of a face.
+---@param ptr ffi.ptr<hb_face_t>
+local function destroyFace(ptr)
+	assert(library).hb_face_destroy(ptr)
+end
+
+---@param ptr ffi.ptr<hb_font_t>
+local function destroyFont(ptr)
+	assert(library).hb_font_destroy(ptr)
+end
+
 --- Whether this machine has the HarfBuzz a string is shaped with.
 ---@return boolean
 function harfbuzz.available()
@@ -139,34 +171,141 @@ function harfbuzz.why()
 	return reason or "No HarfBuzz on this machine: it is what shapes a string into glyphs"
 end
 
---- A shaped font, from the bytes of a font file: what HarfBuzz reads the tables of a font out of.
---- It is asked of the same file the reader opens, so that what a glyph is drawn from and what it was
---- shaped from are one font.
+-- The bytes of a font file, for what HarfBuzz reads it out of: the file's own mapping where the
+-- HarfBuzz there can make one, and one copy of the file where it cannot. A copy is kept for as long
+-- as the process, by the file it is, because a font on disk does not change under an app that is
+-- drawing text and the face made from it is kept the same way.
+---@type table<string, string>
+local copied = {}
+
+---@param api ffi.namespace*
+---@param path string
+---@return ffi.ptr<hb_blob_t>? blob
+local function blobOfFile(api, path)
+	-- What a HarfBuzz too old to have a file mapping says when it is asked for one is an error rather
+	-- than nothing, so what it has is asked for and the answer is what says whether it has it.
+	local hasFile = pcall(function() return api.hb_blob_create_from_file end)
+
+	if not hasFile then
+		local bytes = copied[path]
+
+		if bytes == nil then
+			local file = io.open(path, "rb")
+
+			if file == nil then
+				return nil
+			end
+
+			bytes = file:read("*a")
+
+			file:close()
+
+			if type(bytes) ~= "string" then
+				return nil
+			end
+
+			copied[path] = bytes
+		end
+
+		return api.hb_blob_create(ffi.cast("const char *", bytes), #bytes, READONLY, nil, nil)
+	end
+
+	local blob = api.hb_blob_create_from_file(path)
+
+	if blob == nil then
+		return nil
+	end
+
+	if api.hb_blob_get_length(blob) == 0 then
+		api.hb_blob_destroy(blob)
+
+		return nil
+	end
+
+	return blob
+end
+
+--- One face of a font file, which is what the shaped fonts of it read their tables out of. What it
+--- reads is the file's own mapping rather than a string of it in Lua: a font is tens of megabytes of
+--- tables a line reads a few of, and a copy of the whole file for each size a face is shaped at is
+--- what a screen of text used to cost.
+---
+--- A face is made once for each file and index, so that every size shaped from it -- and every
+--- screen drawing text in it -- reads the one mapping. What holds it is the caller, and what frees
+--- it, and the shaped fonts below that read it, is when the last of them is collected.
+---@param path string
+---@param index number?
+---@return ffi.ptr<hb_face_t>? face
+---@return string? err
+function harfbuzz.face(path, index)
+	local api = assert(library, harfbuzz.why())
+
+	-- One face a file and an index, however many weights and sizes draw text from it: what the
+	-- face is, is that file's tables, and a second mapping of a font of tens of megabytes is a
+	-- second copy of the pages a shape reads. What is kept is weak, so a file no font reads any
+	-- more is unmapped when the collector next runs.
+	local key = path .. "\0" .. (index or 0)
+	local known = faces[key]
+
+	if known ~= nil then
+		return known
+	end
+
+	local blob = blobOfFile(api, path)
+
+	if blob == nil then
+		return nil, path .. " could not be read as a font"
+	end
+
+	local face = ffi.gc(api.hb_face_create(blob, index or 0), destroyFace)
+
+	-- The face holds the blob it was made from, so this call's own reference is given back here:
+	-- waiting for the collector would keep the file mapped for as long as an unreachable pointer
+	-- lived rather than for as long as the face is used.
+	api.hb_blob_destroy(blob)
+
+	faces[key] = face
+
+	return face
+end
+
+--- One face of a font a caller already holds the bytes of -- an embedded font, or one downloaded --
+--- which is read where it lies rather than copied: the bytes stay the caller's, and so does keeping
+--- them alive for as long as the face is used.
+---@param bytes ffi.ptr<ffi.uint8_t> # The first byte of the font
+---@param length number
+---@param index number?
+---@return ffi.ptr<hb_face_t>? face
+---@return string? err
+function harfbuzz.faceBytes(bytes, length, index)
+	local api = assert(library, harfbuzz.why())
+
+	local blob = api.hb_blob_create(ffi.cast("const char *", bytes), length, READONLY, nil, nil)
+
+	if blob == nil then
+		return nil, "the bytes of this font could not be read"
+	end
+
+	local face = ffi.gc(api.hb_face_create(blob, index or 0), destroyFace)
+
+	api.hb_blob_destroy(blob)
+
+	return face
+end
+
+--- A font of a face at a size: what a line is shaped with.
 ---
 --- The size it is given is the em in sixty-fourths of a pixel -- the same number the reader is given
 --- for the same line height -- because that is what makes the two agree: what HarfBuzz measures and
---- what FreeType draws are then the same pixels.
----@param content string
----@param index number?
+--- what FreeType draws are then the same pixels. Nothing of the file is read here: a font is a size
+--- of a face, and the face it shares with every other size of the same file holds the tables.
+---@param face ffi.ptr<hb_face_t>
 ---@param em number # How large the em is, in pixels
 ---@return ffi.ptr<hb_font_t> font
----@return ffi.ptr<hb_blob_t> blob # Kept by the caller: the font reads it, and the font is freed after it
----@return ffi.ptr<hb_face_t> face
-function harfbuzz.font(content, index, em)
+function harfbuzz.font(face, em)
 	local api = assert(library, harfbuzz.why())
 
-	-- The bytes of the file are copied into a buffer of this call's own rather than handed to
-	-- `ffi.new` as an initialiser: an array of characters whose length is written out with the bytes
-	-- beside it is a shape this LuaJIT gets wrong, and what it does instead is corrupt the heap
-	-- where the writing is not seen until something else is swept -- see the note in this
-	-- repository's AGENTS.md.
-	local bytes = ffi.new("char[?]", #content)
-
-	ffi.copy(bytes, content, #content)
-
-	local blob = api.hb_blob_create(ffi.cast("const char *", bytes), #content, DUPLICATE, nil, nil)
-	local face = api.hb_face_create(blob, index or 0)
-	local font = api.hb_font_create(face)
+	local font = ffi.gc(api.hb_font_create(face), destroyFont)
 
 	-- What HarfBuzz counts in is sixty-fourths of a pixel, and what is handed in is the em in whole
 	-- ones: a scale of eighteen is an em of eighteen sixty-fourths, which is a line a hundredth of
@@ -178,21 +317,7 @@ function harfbuzz.font(content, index, em)
 	api.hb_font_set_scale(font, scaled, scaled)
 	api.hb_font_set_ppem(font, ppem, ppem)
 
-	return font, blob, face
-end
-
----@param font ffi.ptr<hb_font_t>
----@param blob ffi.ptr<hb_blob_t>
----@param face ffi.ptr<hb_face_t>
-function harfbuzz.free(font, blob, face)
-	if library == nil then
-		return
-	end
-
-	local api = assert(library)
-	api.hb_font_destroy(font)
-	api.hb_face_destroy(face)
-	api.hb_blob_destroy(blob)
+	return font
 end
 
 --- Shapes one run of text into the glyphs it is drawn from, in the order they are drawn in, each
@@ -265,15 +390,13 @@ function harfbuzz.shape(font, text, opts, into, at)
 		local position = positions[index]
 		local advance = tonumber(position.x_advance) / 64
 
-		into[at + index + 1] = {
-			glyph = info.codepoint,
+		-- A glyph of the line is written where the line holds it: a struct rather than a table,
+		-- because what a line of new text costs is a table for each of its glyphs.
+		into[at + index + 1] = ffi.new("texter_glyph", info.codepoint,
 			-- What HarfBuzz answers a cluster as is the byte of the line this run is a stretch of,
 			-- which is what a caret is placed by.
-			cluster = tonumber(info.cluster),
-			x = x + pen + tonumber(position.x_offset) / 64,
-			y = -tonumber(position.y_offset) / 64,
-			advance = advance,
-		}
+			tonumber(info.cluster), x + pen + tonumber(position.x_offset) / 64,
+			-tonumber(position.y_offset) / 64, advance)
 
 		pen += advance
 	end

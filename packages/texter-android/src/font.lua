@@ -33,11 +33,190 @@ ffi.cdef [[
 
 local graphicsLoaded, graphics = pcall(ffi.load, "jnigraphics")
 
-local Bytes = ffi.typeof("uint8_t[?]")
+local ByteArray = ffi.typeof("uint8_t[?]")
 local BitmapInfo = ffi.typeof("texter_android_bitmap_info")
 local PixelsOut = ffi.typeof("void*[1]")
 local GlyphIds = ffi.typeof("int32_t[1]")
 local Positions = ffi.typeof("float[2]")
+
+-- What maps a font file into the app: POSIX's mmap, which Android has and which is the difference
+-- between a face reading a font and a face holding a copy of one. The names are this module's own
+-- rather than the C library's, so a second module declaring the same call in the same process does
+-- not have to agree with this one about it.
+local isPosix = ffi.os ~= "Windows"
+
+if isPosix then
+	ffi.cdef [[
+		int texter_android_open(const char *path, int flags, ...) __asm__("open");
+		int texter_android_close(int fd) __asm__("close");
+		long texter_android_lseek(int fd, long offset, int whence) __asm__("lseek");
+		void *texter_android_mmap(void *address, size_t length, int protection, int flags, int fd,
+			long offset) __asm__("mmap");
+		int texter_android_munmap(void *address, size_t length) __asm__("munmap");
+	]]
+end
+
+local O_RDONLY = 0
+local PROT_READ = 1
+local MAP_PRIVATE = 2
+local SEEK_END = 2
+
+-- The bytes of a font file, where they lie: the mapping of the file, or a string when the platform
+-- has no mapping to make. A font is megabytes of tables a line reads a few of, and what reads a
+-- font here reads a byte at an offset rather than the whole file kept in a Lua string -- which is
+-- what a variable font used to cost for each weight a screen drew it in. Every face made from the
+-- same file reads the one mapping, and the mapping goes when the last of them does.
+--
+-- The offsets are from nought, which is what the font's own tables are written in.
+---@class texter.android.Mapped: texter.common.Bytes
+---@field length number
+---@field pointer ffi.cdata* # uint8_t*: the first byte, and the pointer that unmaps it
+local Bytes = {}
+Bytes.__index = Bytes
+
+---@param at number # From nought
+---@return number
+function Bytes:u16(at)
+	if at < 0 or at + 1 >= self.length then
+		return 0
+	end
+
+	local pointer = self.pointer
+
+	return (pointer[at] << 8) | pointer[at + 1]
+end
+
+---@param at number # From nought
+---@return number
+function Bytes:u32(at)
+	if at < 0 or at + 3 >= self.length then
+		return 0
+	end
+
+	local pointer = self.pointer
+
+	return (pointer[at] * 256 + pointer[at + 1]) * 65536 + pointer[at + 2] * 256 + pointer[at + 3]
+end
+
+--- The four bytes at an offset, as the tag they spell.
+---@param at number # From nought
+---@return string
+function Bytes:tag(at)
+	return self:slice(at, 4)
+end
+
+--- A stretch of the bytes. What a font says about itself is read through this, so an offset past
+--- the end of the file is answered with what there is rather than with a fault: a font that is not
+--- one is a file a user may have, not a reason to take the app down.
+---@param at number # From nought
+---@param length number
+---@return string
+function Bytes:slice(at, length)
+	if at < 0 then
+		length, at = length + at, 0
+	end
+
+	if length <= 0 or at >= self.length then
+		return ""
+	end
+
+	if at + length > self.length then
+		length = self.length - at
+	end
+
+	return ffi.string(self.pointer + at, length)
+end
+
+-- The same view over a string a caller already holds, for a platform that cannot map the file: what
+-- reads a font asks a view the same questions on every platform.
+---@class texter.android.Text: texter.common.Bytes
+---@field length number
+---@field data string
+local Text = {}
+Text.__index = Text
+
+---@param at number # From nought
+---@return number
+function Text:u16(at)
+	local high, low = self.data:byte(at + 1, at + 2)
+
+	return ((high or 0) << 8) | (low or 0)
+end
+
+---@param at number # From nought
+---@return number
+function Text:u32(at)
+	local a, b, c, d = self.data:byte(at + 1, at + 4)
+
+	return ((a or 0) * 256 + (b or 0)) * 65536 + (c or 0) * 256 + (d or 0)
+end
+
+---@param at number # From nought
+---@return string
+function Text:tag(at)
+	return self.data:sub(at + 1, at + 4)
+end
+
+---@param at number # From nought
+---@param length number
+---@return string
+function Text:slice(at, length)
+	return self.data:sub(at + 1, at + length)
+end
+
+--- A view of the bytes of a string.
+---@param content string
+---@return texter.android.Text
+local function textBytes(content)
+	return setmetatable({ data = content, length = #content }, Text)
+end
+
+--- A view of bytes a face has copied into memory of its own, which it keeps alive.
+---@param buffer ffi.cdata*
+---@param length number
+---@return texter.android.Mapped
+local function memoryBytes(buffer, length)
+	return setmetatable({ pointer = ffi.cast("const uint8_t *", buffer), length = length }, Bytes)
+end
+
+--- A font file mapped, or nothing where the platform cannot map it.
+---@param path string
+---@return texter.android.Mapped? bytes
+local function mapFile(path)
+	if not isPosix then
+		return nil
+	end
+
+	local descriptor = ffi.C.texter_android_open(path, O_RDONLY)
+
+	if descriptor < 0 then
+		return nil
+	end
+
+	local length = tonumber(ffi.C.texter_android_lseek(descriptor, 0, SEEK_END))
+
+	if length == nil or length <= 0 then
+		ffi.C.texter_android_close(descriptor)
+
+		return nil
+	end
+
+	local address = ffi.C.texter_android_mmap(nil, length, PROT_READ, MAP_PRIVATE, descriptor, 0)
+
+	ffi.C.texter_android_close(descriptor)
+
+	if address == nil or ffi.cast("intptr_t", address) == -1 then
+		return nil
+	end
+
+	-- What is kept is the pointer that unmaps: the mapping goes when the last view of it does, and
+	-- every read of the bytes goes through it.
+	local pointer = ffi.gc(ffi.cast("const uint8_t *", address), function(mapped)
+		ffi.C.texter_android_munmap(mapped, length)
+	end)
+
+	return setmetatable({ pointer = pointer, length = length }, Bytes)
+end
 
 -- Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG.
 local PAINT_FLAGS = 0x01 + 0x80
@@ -82,89 +261,153 @@ function font.why()
 	return nil
 end
 
---- A font file read: the Java Font it is, the cmap of its bytes, and a Paint at each size it has
---- been asked about.
----@class texter.android.Face: texter.Face
----@field path string
----@field index number
----@field content string # The font's bytes: what the cmap is read from
----@field font ffi.cdata* # Global reference to the android.graphics.fonts.Font
----@field typeface ffi.cdata* # Global reference to a Typeface of just this font, for shaping
----@field cmap texter.common.Cmap?
----@field family string?
+--- What is read of a font file rather than of one face of it: its bytes, its cmap, the family it
+--- names and the line metrics it states. None of those changes with the weight a variable font is
+--- drawn at, so every weight of a file reads the one mapping and the one cmap.
+---@class texter.android.FontFile
+---@field bytes texter.common.Bytes # Where the font's tables lie, mapped or in memory
+---@field cmap texter.common.Cmap? # What a codepoint comes to, or nothing where the font has none
+---@field family string? # The family the font says it is
 ---@field unitsPerEm number
 ---@field ascender number # In font units: OS/2's typographic ascender where the font asks for it, hhea's otherwise
 ---@field descender number
 ---@field lineGap number
+---@field colour boolean # Whether it has colour glyph tables, COLR, CBDT or sbix
+
+--- A font file read: the Java Font it is, and what is read of the file rather than of the face.
+---@class texter.android.Face: texter.Face
+---@field path string
+---@field index number
+---@field file texter.android.FontFile # The file the face was read from, shared by its every weight
+---@field font ffi.cdata* # Global reference to the android.graphics.fonts.Font
+---@field typeface ffi.cdata* # Global reference to a Typeface of just this font, for shaping
 ---@field paints table<number, ffi.cdata*> # Global references to a Paint per pixel height
 ---@field buffer ffi.cdata*? # Where a font read from bytes lives, which Java reads in place
----@field isColour boolean? # Whether the font has colour glyph tables, read once
 ---@field private room number
 ---@field private stack ffi.array<ffi.uint8_t>
 local Face = {}
 Face.__index = Face
 
----@param content string
----@param at number
-local function u16(content, at)
-	local high, low = content:byte(at, at + 1)
-	return ((high or 0) << 8) | (low or 0)
-end
-
----@param content string
----@param at number
-local function s16(content, at)
-	local value = u16(content, at)
-	return value >= 0x8000 and value - 0x10000 or value
-end
-
----@param content string
----@param at number
-local function u32(content, at)
-	local a, b, c, d = content:byte(at, at + 3)
-	return ((a or 0) * 256 + (b or 0)) * 65536 + (c or 0) * 256 + (d or 0)
-end
-
---- The offset of a table of the font at `index` of a file, from one.
----@param content string
+--- The offset of a table of the font at `index` of a file, from nought.
+---@param source texter.common.Bytes
 ---@param index number
 ---@param wanted string
-local function tableAt(content, index, wanted)
-	local start = 1
-	if content:sub(1, 4) == "ttcf" then
-		start = u32(content, 13 + index * 4) + 1
+---@return number? at
+local function tableAt(source, index, wanted)
+	local start = 0
+	if source:tag(0) == "ttcf" then
+		start = source:u32(12 + index * 4)
 	end
-	local count = u16(content, start + 4)
+	local count = source:u16(start + 4)
 	for record = 0, math.min(count, 512) - 1 do
 		local entry = start + 12 + record * 16
-		if content:sub(entry, entry + 3) == wanted then
-			return u32(content, entry + 8) + 1
+		if source:tag(entry) == wanted then
+			return source:u32(entry + 8)
 		end
 	end
 	return nil
 end
 
+---@param source texter.common.Bytes
+---@param at number # From nought
+---@return number
+local function s16(source, at)
+	local value = source:u16(at)
+	return value >= 0x8000 and value - 0x10000 or value
+end
+
 --- The line metrics a font states for itself: what FreeType reads as ascender, descender and
 --- height. OS/2's typographic values where the font says to use them, hhea's otherwise -- which
 --- is the same choice Android makes for its own lines.
----@param content string
+---@param source texter.common.Bytes
 ---@param index number
 ---@return number unitsPerEm, number ascender, number descender, number lineGap
-local function lineMetrics(content, index)
-	local head = tableAt(content, index, "head")
-	local unitsPerEm = head and u16(content, head + 18) or 1000
+local function lineMetrics(source, index)
+	local head = tableAt(source, index, "head")
+	local unitsPerEm = head and source:u16(head + 18) or 1000
 
-	local os2 = tableAt(content, index, "OS/2")
-	if os2 and (u16(content, os2 + 62) & 0x80) ~= 0 then
-		return unitsPerEm, s16(content, os2 + 68), s16(content, os2 + 70), s16(content, os2 + 72)
+	local os2 = tableAt(source, index, "OS/2")
+	if os2 and (source:u16(os2 + 62) & 0x80) ~= 0 then
+		return unitsPerEm, s16(source, os2 + 68), s16(source, os2 + 70), s16(source, os2 + 72)
 	end
 
-	local hhea = tableAt(content, index, "hhea")
+	local hhea = tableAt(source, index, "hhea")
 	if hhea then
-		return unitsPerEm, s16(content, hhea + 4), s16(content, hhea + 6), s16(content, hhea + 8)
+		return unitsPerEm, s16(source, hhea + 4), s16(source, hhea + 6), s16(source, hhea + 8)
 	end
 
 	return unitsPerEm, math.floor(unitsPerEm * 0.8), -math.floor(unitsPerEm * 0.2), 0
+end
+
+--- What is read of a font's bytes once, whatever weight draws from them.
+---@param source texter.common.Bytes
+---@param index number
+---@return texter.android.FontFile
+local function fileOfBytes(source, index)
+	local unitsPerEm, ascender, descender, lineGap = lineMetrics(source, index)
+
+	return {
+		bytes = source,
+		cmap = cmap.of(source, index),
+		family = common.sfnt.family(source),
+		unitsPerEm = unitsPerEm,
+		ascender = ascender,
+		descender = descender,
+		lineGap = lineGap,
+		colour = tableAt(source, index, "COLR") ~= nil
+			or tableAt(source, index, "CBDT") ~= nil
+			or tableAt(source, index, "sbix") ~= nil,
+	}
+end
+
+-- The files read, by where they are and which font of a collection: what a second weight of one
+-- file reads rather than maps and parses again. Held weakly, so a file no face draws from any more
+-- is unmapped when the collector next runs.
+---@type table<string, texter.android.FontFile>
+local files = setmetatable({}, { __mode = "v" })
+
+--- The file at a path, read the first time a face of it is made.
+---@param path string
+---@param index number
+---@return texter.android.FontFile? file
+---@return string? err
+local function fileAt(path, index)
+	local key = path .. "\0" .. index
+	local known = files[key]
+
+	if known ~= nil then
+		return known
+	end
+
+	local source = mapFile(path)
+
+	if source == nil then
+		-- A platform that cannot map a file, or one the mapping refuses, is read whole as it used to
+		-- be: correctness first, and the copy is the cost only where there is no mapping.
+		local file = io.open(path, "rb")
+
+		if file == nil then
+			return nil, "Could not read " .. path
+		end
+
+		local content = file:read("*a")
+
+		file:close()
+
+		if type(content) ~= "string" then
+			return nil, "Could not read " .. path
+		end
+
+		source = textBytes(content)
+	end
+
+	---@cast source -nil
+
+	local made = fileOfBytes(source, index)
+
+	files[key] = made
+
+	return made
 end
 
 --- How large the em is, in pixels, for a line `pixelHeight` tall: what a pixel height is here is
@@ -172,22 +415,22 @@ end
 ---@param face texter.android.Face
 ---@param pixelHeight number
 local function emOf(face, pixelHeight)
-	local line = face.ascender - face.descender
-	local scale = line > 0 and pixelHeight / line or pixelHeight / face.unitsPerEm
-	return scale * face.unitsPerEm
+	local file = face.file
+	local line = file.ascender - file.descender
+	local scale = line > 0 and pixelHeight / line or pixelHeight / file.unitsPerEm
+
+	return scale * file.unitsPerEm
 end
 
 font.emOf = emOf
 
 --- A face from a Java Font that has been built.
 ---@param javaFont ffi.cdata*
----@param content string
+---@param file texter.android.FontFile
 ---@param path string
 ---@param index number
 ---@param buffer ffi.cdata*?
-local function fromFont(javaFont, content, path, index, buffer)
-	local unitsPerEm, ascender, descender, lineGap = lineMetrics(content, index)
-
+local function fromFont(javaFont, file, path, index, buffer)
 	-- A Typeface of this one font and nothing after it: the shaper otherwise falls back to the
 	-- system's fonts for a character this one lacks, and those glyph ids are not this face's.
 	local typeface = jni.frame(function()
@@ -203,37 +446,31 @@ local function fromFont(javaFont, content, path, index, buffer)
 	return setmetatable({
 		path = path,
 		index = index,
-		content = content,
+		file = file,
 		font = jni.global(javaFont),
 		typeface = assert(typeface, "Typeface.CustomFallbackBuilder failed"),
-		cmap = cmap.of(content, index),
-		family = common.sfnt.family(content),
-		unitsPerEm = unitsPerEm,
-		ascender = ascender,
-		descender = descender,
-		lineGap = lineGap,
 		paints = {},
 		buffer = buffer,
 		room = 0,
-		stack = Bytes(0),
+		stack = ByteArray(0),
 	}, Face)
 end
 
 --- Reads a font file. A variable font -- Android's Roboto is one file for every weight -- is set to
 --- `opts.weight` on its weight axis, which is what makes it draw bold; a font with no such axis
---- draws as it is.
+--- draws as it is. Nothing of the file is read into a Lua string: what the face parses is the
+--- mapping of it, which every weight of it shares.
 ---@param path string
 ---@param index number?
 ---@param opts { weight: number? }?
 ---@return texter.android.Face? face
 ---@return string? err
 function font.open(path, index, opts)
-	local file = io.open(path, "rb")
+	local which = index or 0
+	local file, err = fileAt(path, which)
 	if file == nil then
-		return nil, "Could not read " .. path
+		return nil, err
 	end
-	local content = file:read("*a")
-	file:close()
 
 	local weight = opts ~= nil and tonumber(opts.weight) or nil
 
@@ -241,7 +478,7 @@ function font.open(path, index, opts)
 		local builder = jni.new("android/graphics/fonts/Font$Builder", "(Ljava/io/File;)V",
 			jni.new("java/io/File", "(Ljava/lang/String;)V", jni.string(path)))
 		builder = jni.call(builder, "android/graphics/fonts/Font$Builder", "setTtcIndex",
-			"(I)Landroid/graphics/fonts/Font$Builder;", "object", index or 0)
+			"(I)Landroid/graphics/fonts/Font$Builder;", "object", which)
 		if weight ~= nil and weight ~= 400 then
 			builder = jni.call(builder, "android/graphics/fonts/Font$Builder", "setFontVariationSettings",
 				"(Ljava/lang/String;)Landroid/graphics/fonts/Font$Builder;", "object",
@@ -251,7 +488,7 @@ function font.open(path, index, opts)
 		end
 		local javaFont = jni.call(builder, "android/graphics/fonts/Font$Builder", "build",
 			"()Landroid/graphics/fonts/Font;", "object")
-		return fromFont(javaFont, content, path, index or 0, nil)
+		return fromFont(javaFont, file, path, which, nil)
 	end)
 
 	if made == nil then
@@ -267,18 +504,24 @@ end
 ---@return texter.android.Face? face
 ---@return string? err
 function font.openBytes(content, index)
+	local which = index or 0
+
 	-- Copied rather than handed to the constructor as an initialiser: see this repository's AGENTS.md.
-	local buffer = Bytes(#content)
+	local buffer = ByteArray(#content)
 	ffi.copy(buffer, content, #content)
+
+	-- What the face parses is the copy Java reads rather than a second copy of the same bytes in a
+	-- Lua string: a font is megabytes, and one of them is enough.
+	local file = fileOfBytes(memoryBytes(buffer, #content), which)
 
 	local made, err = jni.frame(function()
 		local direct = jni.directBuffer(buffer, #content)
 		local builder = jni.new("android/graphics/fonts/Font$Builder", "(Ljava/nio/ByteBuffer;)V", direct)
 		builder = jni.call(builder, "android/graphics/fonts/Font$Builder", "setTtcIndex",
-			"(I)Landroid/graphics/fonts/Font$Builder;", "object", index or 0)
+			"(I)Landroid/graphics/fonts/Font$Builder;", "object", which)
 		local javaFont = jni.call(builder, "android/graphics/fonts/Font$Builder", "build",
 			"()Landroid/graphics/fonts/Font;", "object")
-		return fromFont(javaFont, content, "<memory>", index or 0, buffer)
+		return fromFont(javaFont, file, "<memory>", which, buffer)
 	end)
 
 	if made == nil then
@@ -316,7 +559,9 @@ end
 ---@param codepoint number
 ---@return number
 function Face:glyphFor(codepoint)
-	return self.cmap and self.cmap:glyph(codepoint) or 0
+	local cmapOf = self.file.cmap
+
+	return cmapOf and cmapOf:glyph(codepoint) or 0
 end
 
 --- Whether the font draws this character at all.
@@ -333,8 +578,10 @@ end
 ---@return number descent
 ---@return number lineGap
 function Face:metrics(pixelHeight)
-	local scale = emOf(self, pixelHeight) / self.unitsPerEm
-	return self.ascender * scale, self.descender * scale, math.max(0, self.lineGap * scale)
+	local file = self.file
+	local scale = emOf(self, pixelHeight) / file.unitsPerEm
+
+	return file.ascender * scale, file.descender * scale, math.max(0, file.lineGap * scale)
 end
 
 --- How far the pen moves for a character, in pixels at this size: what Font.getGlyphBounds
@@ -363,6 +610,7 @@ local canvases = {}
 
 ---@param colour boolean
 ---@param need number
+---@return texter.android.Canvas
 local function canvasFor(colour, need)
 	local kind = colour and "ARGB_8888" or "ALPHA_8"
 	local kept = canvases[kind]
@@ -387,6 +635,8 @@ local function canvasFor(colour, need)
 		return { bitmap = jni.global(bitmap), canvas = jni.global(canvas), size = size }
 	end))
 
+	---@cast made texter.android.Canvas
+
 	canvases[kind] = made
 	return made
 end
@@ -401,12 +651,7 @@ local pixelsOut = PixelsOut()
 --- glyph its colour table covers, and a glyph it has no colours for comes out grey on white.
 ---@param face texter.android.Face
 local function isColourFont(face)
-	if face.isColour == nil then
-		face.isColour = tableAt(face.content, face.index, "COLR") ~= nil
-			or tableAt(face.content, face.index, "CBDT") ~= nil
-			or tableAt(face.content, face.index, "sbix") ~= nil
-	end
-	return face.isColour == true
+	return face.file.colour
 end
 
 --- The ink of a glyph, drawn into the bitmap this module keeps and copied into the buffer this face
@@ -472,7 +717,7 @@ function Face:inkOf(glyph, pixelHeight, offset)
 	local room = width * height * bytes
 	if room > self.room then
 		self.room = room
-		self.stack = Bytes(room)
+		self.stack = ByteArray(room)
 	end
 
 	local from = ffi.cast("uint8_t*", pixelsOut[0])

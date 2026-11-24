@@ -26,22 +26,30 @@ local utf8 = require("texter-common").utf8
 -- a table of a glyph each, which is the one table a caller is handed and the one worth sizing.
 local table_new = require("table.new")
 
+-- What one run is shaped by, written again for each run of each line rather than made for it: a
+-- line of a screen is a table a run, and what HarfBuzz reads here is not kept past the call.
+local runOpts = { direction = nil, language = nil, from = nil, to = nil, x = nil }
+
 local texter = {}
 
--- The bytes of each face, and the shaped fonts made from them: what a shaper is handed is the
--- whole of a font file, and what HarfBuzz reads a font's tables into is a font of its own, made
--- once for each size a face is shaped at. Both are kept beside the face rather than on it, because
--- a face is the reader's and this is the shaper's. The keys are weak, so what is kept of a face
--- goes when the face does.
----@type table<texter.freetype.Face, string>
-local contents = {}
+-- What HarfBuzz reads each face out of, and the fonts shaped from it at each size: a face is the
+-- font file and a font is a size of it, so the file is mapped once however many sizes draw text from
+-- it, and a size costs a font rather than a copy of the whole file. What is kept is beside the
+-- reader's face rather than on it, because a face is the reader's and this is the shaper's. The keys
+-- are weak, so what is kept of a face goes when the face does.
+---@class texter.freetype.Shaper
+---@field face ffi.ptr<hb_face_t> # The font file, as HarfBuzz reads it
+---@field fonts table<number, ffi.ptr<hb_font_t>> # The fonts of it, by the pixel height they are at
 
-setmetatable(contents, { __mode = "k" })
+---@type table<texter.freetype.Face, texter.freetype.Shaper>
+local shapers = {}
 
----@type table<texter.freetype.Face, table<number, ffi.ptr<hb_font_t>>>
-local shapedFonts = {}
+setmetatable(shapers, { __mode = "k" })
 
-setmetatable(shapedFonts, { __mode = "k" })
+-- The bytes a face read from memory keeps, held by the fonts shaped from it: a face may be given
+-- back while a caller still holds a font of it, and HarfBuzz reads the bytes where they lie.
+---@type table<ffi.ptr<hb_font_t>, string>
+local keptBytes = setmetatable({}, { __mode = "k" })
 
 --- One line, shaped and placed: what a renderer draws.
 ---@class texter.Line
@@ -70,62 +78,49 @@ function texter.arranges()
 	return bidi.available()
 end
 
---- The bytes of a font file, read the first time a line is shaped from that face: what HarfBuzz reads
---- a font's tables out of is the whole file, and FreeType needs none of it. So a face a screen only
---- packs glyphs from is copied by nobody, and one a line is shaped in costs one copy of the file.
+--- What reads a face's tables for HarfBuzz: the mapping of the file it was opened from, or the
+--- bytes it was opened from where it came from memory. Made once for a face and kept beside it, so
+--- that every size shaped in it, and every line of every frame after that, reads the one face.
 ---@param face texter.freetype.Face
-local function contentOf(face)
-	local content = contents[face]
+---@return texter.freetype.Shaper? shaper
+---@return string? err
+local function shaperOf(face)
+	local known = shapers[face]
 
-	if content ~= nil then
-		return content
+	if known ~= nil then
+		return known
 	end
+
+	local handle, err
 
 	if face.data ~= nil then
-		contents[face] = face.data
-
-		return face.data
+		-- The bytes FreeType reads a memory face from are the face's own and stay with it, so
+		-- HarfBuzz reads those rather than a second copy of them.
+		handle, err = harfbuzz.faceBytes(assert(face.buffer), #face.data, face.index)
+	else
+		handle, err = harfbuzz.face(face.path, face.index)
 	end
 
-	local file = io.open(face.path, "rb")
-
-	if file == nil then
-		return nil
+	if handle == nil then
+		return nil, err
 	end
 
-	local text = file:read("*a")
+	local shaper = { face = handle, fonts = {} }
 
-	file:close()
+	shapers[face] = shaper
 
-	if type(text) ~= "string" then
-		return nil
-	end
-
-	---@cast text string
-	contents[face] = text
-
-	return text
+	return shaper
 end
 
---- One font file, read: what the reader and the shaper both need of it.
+--- One font file, read: what the reader and the shaper both need of it. Nothing of the file is
+--- read here: the reader maps it for the glyphs it draws and the shaper maps it again for the tables
+--- it reads, both of them as the file is used.
 ---@param path string
 ---@param index number?
 ---@return texter.freetype.Face? face
 ---@return string? err
 function texter.face(path, index)
-	local face, err = freetype.open(path, index)
-
-	if face == nil then
-		return nil, err
-	end
-
-	if contentOf(face) == nil then
-		return nil, "Could not read " .. path
-	end
-
-	shapedFonts[face] = {}
-
-	return face
+	return freetype.open(path, index)
 end
 
 --- A face from the bytes of a font rather than from a file: the reader and the shaper are handed
@@ -135,16 +130,7 @@ end
 ---@return texter.freetype.Face? face
 ---@return string? err
 function texter.faceBytes(content, index)
-	local face, err = freetype.openBytes(content, index)
-
-	if face == nil then
-		return nil, err
-	end
-
-	contents[face] = content
-	shapedFonts[face] = {}
-
-	return face
+	return freetype.openBytes(content, index)
 end
 
 --- Shapes a line: the glyphs it is drawn from, where each of them goes, and which byte of the line
@@ -159,7 +145,7 @@ end
 ---@param opts { direction: "ltr" | "rtl" | "auto"?, language: string? }?
 ---@return texter.Line
 function texter.shape(face, text, pixelHeight, opts)
-	assert(contentOf(face) ~= nil, "This face has no font file to shape from: it was not opened here")
+	assert(face.handle ~= nil, "This face has no font file to shape from: it was not opened here")
 
 	local characters = utf8.characters(text)
 	local runs, rtl = bidi.paragraph(text, characters, opts)
@@ -171,13 +157,13 @@ function texter.shape(face, text, pixelHeight, opts)
 	local glyphs, count, x = table_new(string.len(text), 0), 0, 0.0
 
 	for _, run in ipairs(runs) do
-		local shaped, width = harfbuzz.shape(font, text, {
-			direction = run.rtl ? "rtl" : "ltr",
-			language = opts?.language,
-			from = run.first,
-			to = run.last,
-			x = x,
-		}, glyphs, count)
+		runOpts.direction = run.rtl and "rtl" or "ltr"
+		runOpts.language = opts and opts.language or nil
+		runOpts.from = run.first
+		runOpts.to = run.last
+		runOpts.x = x
+
+		local shaped, width = harfbuzz.shape(font, text, runOpts, glyphs, count)
 
 		count += shaped
 		x += width
@@ -192,22 +178,20 @@ function texter.shape(face, text, pixelHeight, opts)
 	}
 end
 
---- The font a line is shaped with at a size, made once and kept: a shaped font is what HarfBuzz
---- reads a font's own tables into, and making one for every line of every frame is the machine
---- reading the same thousand tables again.
+--- The font a line is shaped with at a size, made once and kept: a font is a size of the face the
+--- file was mapped into, and making one for every line of every frame is the machine reading the
+--- same thousand tables again. A size costs a font, which is a few kilobytes, and never another
+--- copy of the file: what holds the file's tables is the face every size of it shares.
 ---@param face texter.freetype.Face
 ---@param pixelHeight number
 ---@return ffi.ptr<hb_font_t>
 function texter.fontOf(face, pixelHeight)
-	local kept = shapedFonts[face]
-	local content = contentOf(face)
+	local shaper, err = shaperOf(face)
 
-	assert(content ~= nil, "This face has no font file to shape from: it was not opened here")
+	assert(shaper ~= nil, err or "This face has no font file to shape from: it was not opened here")
+	---@cast shaper texter.freetype.Shaper
 
-	kept = kept or {}
-	shapedFonts[face] = kept
-
-	local known = kept[pixelHeight]
+	local known = shaper.fonts[pixelHeight]
 
 	if known ~= nil then
 		return known
@@ -216,9 +200,13 @@ function texter.fontOf(face, pixelHeight)
 	-- The em the reader draws at, in sixty-fourths of a pixel, which is what the shaper is given so
 	-- that the two of them are measuring the same font at the same size.
 	local em = freetype.em(face.handle, pixelHeight)
-	local font = harfbuzz.font(content, face.index, em)
+	local font = harfbuzz.font(shaper.face, em)
 
-	kept[pixelHeight] = font
+	if face.data ~= nil then
+		keptBytes[font] = face.data
+	end
+
+	shaper.fonts[pixelHeight] = font
 
 	return font
 end

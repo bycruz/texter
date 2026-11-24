@@ -13,6 +13,17 @@
 --
 -- This package is a leaf: the backends depend on it and it depends on nothing, which is what keeps
 -- them able to be one per platform without any of them being the one that knows about the others.
+-- The bytes of a font, read where they lie: a Lua string a caller already holds, or the view a
+-- backend maps the file into. What reads a font's tables asks a view five questions, all from an
+-- offset of nought, and a backend that maps a file answers them from the mapping rather than from a
+-- copy of the whole font in a Lua string.
+---@class texter.common.Bytes
+---@field length number # How many bytes there are
+---@field u16 fun(self: texter.common.Bytes, at: number): number
+---@field u32 fun(self: texter.common.Bytes, at: number): number
+---@field tag fun(self: texter.common.Bytes, at: number): string # The four bytes there, as a tag
+---@field slice fun(self: texter.common.Bytes, at: number, length: number): string
+
 local cmap = require("texter-common.cmap")
 local sfnt = require("texter-common.sfnt")
 local utf8 = require("texter-common.utf8")

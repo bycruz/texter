@@ -122,6 +122,16 @@ test.skipIf(face == nil)("counts a cluster in bytes of the line, not in characte
 	test.equal(line.glyphs[3].cluster, 3, "é is two bytes")
 end)
 
+test.skipIf(face == nil)("puts a mark in the cluster of the letter it sits on", function()
+	---@cast face -nil
+	-- e followed by U+0301, combining acute: two characters, one glyph, and the glyph is the
+	-- cluster both of them are in.
+	local line = texter.shape(face, "e\204\129", 24)
+	test.equal(#line.glyphs, 1)
+	test.equal(line.glyphs[1].cluster, 0)
+	test.equal(line.glyphs[1].advance > 0, true)
+end)
+
 test.skipIf(face == nil)("puts a caret where a byte of the line is", function()
 	---@cast face -nil
 	local line = texter.shape(face, "abc", 24)

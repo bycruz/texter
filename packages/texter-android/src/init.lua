@@ -43,13 +43,130 @@ end
 texter.face = font.open
 texter.faceBytes = font.openBytes
 
+-- What a shaped glyph is in a line: the fields of `texter.Glyph` in a struct rather than in a table.
+-- A screen that lays out strings it has not drawn before makes a line for each of them, and a
+-- glyph's struct is a fifth of the table it used to be, which is most of what such a line cost the
+-- collector. Every backend writes the same struct, so what reads a line reads fields either way.
+if not pcall(ffi.typeof, "texter_glyph") then
+	ffi.cdef [[
+		typedef struct {
+			uint32_t glyph;
+			uint32_t cluster;
+			double x;
+			double y;
+			double advance;
+		} texter_glyph;
+	]]
+end
+
+local Glyph = ffi.typeof("texter_glyph")
+
 -- A copy of a run's UTF-16 for Java: the units texter-common hands out are its own buffer, and
 -- the char[] Java is given is made from this module's.
 local runUnits = Units(0)
 local runRoom = 0
 
+-- The advances of a run's characters, and where the clusters they make start in the order the
+-- glyphs are drawn: buffers grown to the longest run shaped and reused, because a line of new text
+-- should not be a buffer a run.
+local Advances = ffi.typeof("float[?]")
+local Units32 = ffi.typeof("uint32_t[?]")
+local advanceRoom = 0
+local charAdvances = Advances(0)
+local clusterStartAt = Advances(0)
+local clusterUnitAt = Units32(0)
+
+--- The first unit of the line that starts at or after `byte`, or the count where none does.
+---@param units texter.Units
+---@param byte number
+---@return number
+local function unitAtOrAfter(units, byte)
+	local low, high = 0, units.count
+
+	while low < high do
+		local middle = math.floor((low + high) / 2)
+
+		if units.offsets[middle] < byte then
+			low = middle + 1
+		else
+			high = middle
+		end
+	end
+
+	return low
+end
+
+--- Where each cluster of a run starts, in the order its glyphs are drawn, and which unit of the run
+--- each starts with.
+---
+--- Android's shaper does not hand out clusters. What it does answer is, for each character of a
+--- run, how far the pen moves for it (`Paint.getTextRunAdvances`): a character that is part of a
+--- cluster but not its first is nought, and the first of a cluster carries the whole cluster's
+--- advance. Laid end to end those are where each cluster starts, and a glyph belongs to the cluster
+--- whose start is the last one at or before where the glyph is.
+---
+--- A run set right to left draws its first character rightmost, so its clusters are read in the
+--- order they are drawn: backwards over the characters, adding up the advances from the left.
+---@param paint ffi.cdata*
+---@param chars ffi.cdata*
+---@param length number
+---@param rtl boolean
+---@return number
+local function clusterStarts(paint, chars, length, rtl)
+	if length > advanceRoom then
+		-- One place a character, since every character can begin a cluster, and one more because
+		-- the clusters are counted from one.
+		advanceRoom = length
+		charAdvances = Advances(advanceRoom)
+		clusterStartAt = Advances(advanceRoom + 1)
+		clusterUnitAt = Units32(advanceRoom + 1)
+	end
+
+	local javaAdvances = jni.floats(charAdvances, length)
+
+	jni.call(paint, "android/graphics/Paint", "getTextRunAdvances", "([CIIIIZ[FI)F", "float",
+		chars, 0, length, 0, length, rtl, javaAdvances, 0)
+	jni.getFloats(javaAdvances, length, charAdvances)
+
+	local count = 0
+
+	if rtl then
+		local pen = 0.0
+
+		for index = length - 1, 0, -1 do
+			local advance = charAdvances[index]
+
+			if advance ~= 0 or index == 0 then
+				count = count + 1
+				clusterStartAt[count] = pen
+				clusterUnitAt[count] = index
+			end
+
+			pen = pen + advance
+		end
+	else
+		local pen = 0.0
+
+		for index = 0, length - 1 do
+			local advance = charAdvances[index]
+
+			if advance ~= 0 or index == 0 then
+				count = count + 1
+				clusterStartAt[count] = pen
+				clusterUnitAt[count] = index
+			end
+
+			pen = pen + advance
+		end
+	end
+
+	return count
+end
+
 --- Shapes one run of a line and writes its glyphs into `into` from `at`.
----@param face texter.android.Face
+---
+--- What the run is, is a stretch of bytes of the line, and the units of the line are in byte order:
+--- so the units of the run are found by bisection rather than by walking the line a second time.
 ---@param paint ffi.cdata*
 ---@param units texter.Units # The whole line
 ---@param run texter.Run
@@ -57,21 +174,11 @@ local runRoom = 0
 ---@param into texter.Glyph[]
 ---@param at number
 ---@return number count, number width
-local function shapeRun(face, paint, units, run, x, into, at)
-	-- The units of this run: from the unit its first byte starts at to the one before the unit its
-	-- byte after last starts at. The line's units are in order of the bytes, so a run is a stretch.
-	local first, last = nil, nil
-	for index = 0, units.count - 1 do
-		local byte = units.offsets[index]
-		if byte >= run.first and byte <= run.last then
-			first = first or index
-			last = index
-		elseif first ~= nil then
-			break
-		end
-	end
+local function shapeRun(paint, units, run, x, into, at)
+	local first = unitAtOrAfter(units, run.first)
+	local last = unitAtOrAfter(units, run.last + 1) - 1
 
-	if first == nil then
+	if first > last then
 		return 0, 0
 	end
 
@@ -95,91 +202,47 @@ local function shapeRun(face, paint, units, run, x, into, at)
 		count = jni.call(glyphs, "android/graphics/text/PositionedGlyphs", "glyphCount", "()I", "int")
 		width = jni.call(glyphs, "android/graphics/text/PositionedGlyphs", "getAdvance", "()F", "float")
 
-		-- PositionedGlyphs says where each glyph is, not where it came from: the cluster of a glyph is
-		-- worked out from the advances of the characters, which Paint answers per character.
-		local clusters = texter.clustersOf(paint, chars, length, run.rtl, count, glyphs)
+		if count == 0 then
+			return true
+		end
+
+		local clusters = clusterStarts(paint, chars, length, run.rtl)
+		local cluster, startX, entry = 1, 0.0, nil
 
 		for index = 0, count - 1 do
-			local glyphX = jni.call(glyphs, "android/graphics/text/PositionedGlyphs", "getGlyphX", "(I)F", "float", index)
-			local glyphY = jni.call(glyphs, "android/graphics/text/PositionedGlyphs", "getGlyphY", "(I)F", "float", index)
-			local nextX = index + 1 < count
-				and jni.call(glyphs, "android/graphics/text/PositionedGlyphs", "getGlyphX", "(I)F", "float", index + 1)
-				or width
+			local glyphX = jni.call(glyphs, "android/graphics/text/PositionedGlyphs", "getGlyphX",
+				"(I)F", "float", index)
+			local glyphY = jni.call(glyphs, "android/graphics/text/PositionedGlyphs", "getGlyphY",
+				"(I)F", "float", index)
+			local glyph = jni.call(glyphs, "android/graphics/text/PositionedGlyphs", "getGlyphId",
+				"(I)I", "int", index)
 
-			into[at + index + 1] = {
-				glyph = jni.call(glyphs, "android/graphics/text/PositionedGlyphs", "getGlyphId", "(I)I", "int", index),
-				cluster = units.offsets[first + clusters[index]] - 1,
-				x = x + glyphX,
-				y = glyphY,
-				advance = nextX - glyphX,
-			}
+			-- The cluster whose box the glyph's origin is in: the last one that starts at or before
+			-- it. Both are in draw order, so this is one walk over the two together.
+			while cluster < clusters and clusterStartAt[cluster + 1] <= glyphX + 0.5 do
+				cluster = cluster + 1
+			end
+
+			-- A glyph's advance is how far the next one is from its origin, which is the next
+			-- glyph's place rather than a second ask of the shaper for it.
+			if entry ~= nil then
+				entry.advance = glyphX - startX
+			end
+
+			entry = Glyph(glyph, units.offsets[first + clusterUnitAt[cluster]] - 1, x + glyphX,
+				glyphY, 0.0)
+			into[at + index + 1] = entry
+			startX = glyphX
+		end
+
+		if entry ~= nil then
+			entry.advance = width - startX
 		end
 
 		return true
 	end, 64 + 8))
 
 	return count, width
-end
-
-local advances = ffi.typeof("float[?]")
-
---- Which unit of the run each glyph came from.
----
---- Android's shaper does not hand out clusters. What it does answer is, for each character of a
---- run, how far the pen moves for it (`Paint.getTextRunAdvances`): a character that is part of a
---- cluster but not its first is nought, and the first of a cluster carries the whole cluster's
---- advance. Laid end to end those are where each cluster starts, and a glyph belongs to the cluster
---- whose start is the last one at or before where the glyph is.
----@param paint ffi.cdata*
----@param chars ffi.cdata*
----@param length number
----@param rtl boolean
----@param count number
----@param glyphs ffi.cdata*
----@return table<number, number> # Glyph index -> unit index within the run
-function texter.clustersOf(paint, chars, length, rtl, count, glyphs)
-	local perChar = advances(length)
-	local javaAdvances = jni.floats(perChar, length)
-
-	jni.call(paint, "android/graphics/Paint", "getTextRunAdvances", "([CIIIIZ[FI)F", "float",
-		chars, 0, length, 0, length, rtl, javaAdvances, 0)
-	jni.getFloats(javaAdvances, length, perChar)
-
-	-- Where each cluster starts, measured from the left whatever the direction: a run set right to
-	-- left draws its first character rightmost.
-	local starts, unitsOf = {}, {}
-	local total = 0
-	for index = 0, length - 1 do
-		total = total + perChar[index]
-	end
-
-	local pen = rtl and total or 0
-	for index = 0, length - 1 do
-		local advance = perChar[index]
-		if advance ~= 0 or index == 0 then
-			local left = rtl and pen - advance or pen
-			starts[#starts + 1] = left
-			unitsOf[#unitsOf + 1] = index
-		end
-		pen = rtl and pen - advance or pen + advance
-	end
-
-	local clusters = {}
-	for index = 0, count - 1 do
-		local glyphX = jni.call(glyphs, "android/graphics/text/PositionedGlyphs", "getGlyphX", "(I)F", "float", index)
-		-- The cluster whose box the glyph's origin is in; half a unit of slack for rounding.
-		local best = 1
-		for cluster = 1, #starts do
-			if starts[cluster] <= glyphX + 0.5 then
-				if starts[cluster] >= starts[best] or starts[best] > glyphX + 0.5 then
-					best = cluster
-				end
-			end
-		end
-		clusters[index] = unitsOf[best]
-	end
-
-	return clusters
 end
 
 --- Shapes a line: the glyphs it is drawn from, where each of them goes, and which byte of the line
@@ -200,7 +263,7 @@ function texter.shape(face, text, pixelHeight, opts)
 	local glyphs, count, x = table_new(#text, 0), 0, 0.0
 
 	for _, run in ipairs(runs) do
-		local shaped, width = shapeRun(face, paint, units, run, x, glyphs, count)
+		local shaped, width = shapeRun(paint, units, run, x, glyphs, count)
 		count = count + shaped
 		x = x + width
 	end

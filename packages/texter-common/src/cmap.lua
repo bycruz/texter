@@ -8,35 +8,78 @@
 -- Formats 4 (the Basic Multilingual Plane, in segments) and 12 (every plane, in groups) are what
 -- fonts carry for Unicode; a font that has a format 12 subtable is read through it, since it
 -- covers what format 4 does and the planes above it, which is where emoji are.
+--
+-- The bytes are read as they are given: a string is read where it lies, and so is the view a
+-- backend maps a font file into, which is what keeps a font of megabytes out of a Lua string -- see
+-- `texter.common.Bytes`. A view answers the same questions with the same offsets, from nought.
 ---@class texter.common.cmap
 local cmap = {}
 
----@param content string
----@param at number # From one
+---@param content string | texter.common.Bytes
+---@param at number # From nought
 local function u16(content, at)
-	local high, low = content:byte(at, at + 1)
+	if type(content) == "string" then
+		local high, low = content:byte(at + 1, at + 2)
 
-	return ((high or 0) << 8) | (low or 0)
+		return ((high or 0) << 8) | (low or 0)
+	end
+
+	---@cast content texter.common.Bytes
+
+	return content:u16(at)
 end
 
----@param content string
----@param at number
+---@param content string | texter.common.Bytes
+---@param at number # From nought
 local function u32(content, at)
-	local a, b, c, d = content:byte(at, at + 3)
+	if type(content) == "string" then
+		local a, b, c, d = content:byte(at + 1, at + 4)
 
-	return ((a or 0) * 256 + (b or 0)) * 65536 + (c or 0) * 256 + (d or 0)
+		return ((a or 0) * 256 + (b or 0)) * 65536 + (c or 0) * 256 + (d or 0)
+	end
+
+	---@cast content texter.common.Bytes
+
+	return content:u32(at)
 end
 
----@param content string
----@param at number
+---@param content string | texter.common.Bytes
+---@param at number # From nought
 local function s16(content, at)
 	local value = u16(content, at)
 
 	return value >= 0x8000 and value - 0x10000 or value
 end
 
---- Where a table starts in the font at `start` (the offset of its table directory), from one.
----@param content string
+--- The four bytes at an offset, as the tag they spell.
+---@param content string | texter.common.Bytes
+---@param at number # From nought
+---@return string
+local function tagAt(content, at)
+	if type(content) == "string" then
+		return content:sub(at + 1, at + 4)
+	end
+
+	---@cast content texter.common.Bytes
+
+	return content:tag(at)
+end
+
+--- How many bytes there are.
+---@param content string | texter.common.Bytes
+---@return number
+local function lengthOf(content)
+	if type(content) == "string" then
+		return #content
+	end
+
+	---@cast content texter.common.Bytes
+
+	return content.length
+end
+
+--- Where a table starts in the font at `start` (the offset of its table directory), from nought.
+---@param content string | texter.common.Bytes
 ---@param start number
 ---@param wanted string
 local function tableAt(content, start, wanted)
@@ -45,8 +88,8 @@ local function tableAt(content, start, wanted)
 	for index = 0, math.min(count, 512) - 1 do
 		local record = start + 12 + index * 16
 
-		if content:sub(record, record + 3) == wanted then
-			return u32(content, record + 8) + 1
+		if tagAt(content, record) == wanted then
+			return u32(content, record + 8)
 		end
 	end
 
@@ -55,33 +98,33 @@ end
 
 --- A lookup from codepoint to glyph id.
 ---@class texter.common.Cmap
----@field private content string
+---@field private content string | texter.common.Bytes
 ---@field private format number
----@field private at number # Where the subtable starts, from one
+---@field private at number # Where the subtable starts, from nought
 ---@field private cache table<number, number>
 local Cmap = {}
 Cmap.__index = Cmap
 
 --- The Unicode mapping of a font, or nil where it has none. `index` is the font of a collection.
----@param content string
+---@param content string | texter.common.Bytes
 ---@param index number?
 ---@return texter.common.Cmap?
 function cmap.of(content, index)
-	if #content < 12 then
+	if lengthOf(content) < 12 then
 		return nil
 	end
 
-	local start = 1
+	local start = 0
 
-	if content:sub(1, 4) == "ttcf" then
-		local count = u32(content, 9)
+	if tagAt(content, 0) == "ttcf" then
+		local count = u32(content, 8)
 		local which = index or 0
 
 		if which >= count then
 			return nil
 		end
 
-		start = u32(content, 13 + which * 4) + 1
+		start = u32(content, 12 + which * 4)
 	end
 
 	local table = tableAt(content, start, "cmap")
